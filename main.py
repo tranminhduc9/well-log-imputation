@@ -9,8 +9,13 @@ import os
 import time
 import logging
 
+# PyPOTS 0.3.2 imports the optional Raindrop graph model at startup and logs
+# missing PyG packages even though this benchmark does not use Raindrop.
+logging.disable(logging.CRITICAL)
 from pypots.utils.metrics import calc_mae, calc_mse, calc_rmse
 from pypots.utils.random import set_random_seed
+logging.disable(logging.NOTSET)
+
 from utils.metrics import cal_r2, cal_cc
 
 import models

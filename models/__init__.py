@@ -204,7 +204,7 @@ class Factory:
         # de Oliveira, Lucas Abreu Blanes and de Carvalho Carneiro, Cleyton, [2021]
         rf = RF(n_features,
                 device=None,
-                n_estimators=500,
+                n_estimators=200,
                 max_depth=None,
                 min_samples_leaf=1,
                 min_samples_split=2,
