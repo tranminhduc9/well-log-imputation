@@ -130,6 +130,7 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
 
     for experiment in experiments:
         mode = experiment['mode']
+        metrics[model_name][f'inference-time-{mode}'] = []
         metrics[model_name][f'validation-mae-{mode}'] = []
         metrics[model_name][f'validation-mse-{mode}'] = []
         metrics[model_name][f'validation-rmse-{mode}'] = []
@@ -193,7 +194,12 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
             print(f'mode {mode}...')
             logging.info(f'mode {mode}...')
 
+            inference_start = time.perf_counter()
             model_imputation = model.predict(dataset_for_validating[mode])
+            inference_time_secs = time.perf_counter() - inference_start
+
+            print(f'masking {mode} inference time:{inference_time_secs:.6f}s')
+            logging.info(f'masking {mode} inference time:{inference_time_secs:.6f}s')
 
             ## Calculate metrics on the ground truth (artificially-missing values):
             val_mae = calc_mae(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
@@ -214,6 +220,7 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
             logging.info(f'masking {mode} testing correlation:{val_cc:.4f}')
 
             ## Save metrics for the model:
+            metrics[model_name][f'inference-time-{mode}'].append(inference_time_secs)
             metrics[model_name][f'validation-mae-{mode}'].append(val_mae)
             metrics[model_name][f'validation-mse-{mode}'].append(val_mse)
             metrics[model_name][f'validation-rmse-{mode}'].append(val_rmse)
@@ -238,7 +245,8 @@ def print_table(model_name: str, metrics: dict[str, dict[str, list[float]]]) -> 
     metrics = metrics[model_name]
 
     for name, metric in metrics.items():
-        m_str = [f'{x:.4f}' for x in metric]
+        precision = 6 if name.startswith('inference-time-') else 4
+        m_str = [f'{x:.{precision}f}' for x in metric]
         m_str = '\t'.join(m_str)
         print(f'{name}:\t {m_str}')
         logging.info(f'{name}: {m_str}')
