@@ -10,6 +10,9 @@ import random
 import numpy as np
 import torch
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_DATASET_DIR = PROJECT_ROOT / "data" / "imputation-processed-datasets"
+
 class Configs:
     def __init__(self):
         parser = ArgumentParser("Imputation Benchmarking")
@@ -21,7 +24,7 @@ class Configs:
         
         # dataset
         parser.add_argument("--dataset_name", type=str.lower, default="geolink", choices=["geolink", "taranaki", "teapot"])
-        parser.add_argument("--dataset_dir", type=Path, default=Path("preprocessed_data"), help="Path to location of the preprocessed data (.npy files)")
+        parser.add_argument("--dataset_dir", type=Path, default=DEFAULT_DATASET_DIR, help="Path to location of the preprocessed data (.npy files)")
         parser.add_argument("--logs", type=str.upper, nargs='+', default=['GR', 'DTC', 'RHOB', 'NPHI'],
                             help="named profiles presented on the data (in the order found in the arrays)")
         

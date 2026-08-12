@@ -9,7 +9,6 @@ import os
 import time
 import logging
 
-from pypots.data import masked_fill
 from pypots.utils.metrics import cal_mae, cal_mse, cal_rmse
 from utils.metrics import cal_r2, cal_cc
 from pypots.optim import Adam, AdamW
@@ -78,15 +77,17 @@ def get_dataset_dict(data: np.ndarray, mode: str,
                                                         b_size=b_size,
                                                         feat=profile)
     if fill:
-        X = masked_fill(X, 1 - missing_mask, np.nan)
+        X = np.where(missing_mask, X, np.nan)
     
     if do_copy:
         data_dict = {'X': X.copy(),
                      'X_intact': X_intact,
+                     'X_ori': X_intact,
                      'indicating_mask': indicating_mask.copy()}
     else:
         data_dict = {'X': X,
                      'X_intact': X_intact,
+                     'X_ori': X_intact,
                      'indicating_mask': indicating_mask}
     
     if include_mask:
