@@ -7,7 +7,6 @@ This file contains the capsules of the following methods:
     and XGBoost (xgboost package https://xgboost.readthedocs.io/en/stable/python/python_intro.html )
 '''
 
-from pypots.imputation.base import BaseImputer
 from typing import Union, Optional
 import torch
 import numpy as np
@@ -15,7 +14,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
 
-class RF(BaseImputer):
+class RF:
     '''
     Random Forest based imputation method. 
     
@@ -33,8 +32,6 @@ class RF(BaseImputer):
                          It includes parameters for model configuration or training criteria 
                          (See: https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestRegressor.html#sklearn.ensemble.RandomForestRegressor )
         '''
-        
-        super().__init__(device=device)
         
         self.num_models = num_models    
         self.models = {}
@@ -98,7 +95,7 @@ class RF(BaseImputer):
     def impute(self,):
         pass
     
-class XGBOOST(BaseImputer):
+class XGBOOST:
     def __init__(self, num_models: int, device: Optional[Union[str, torch.device, list]] = None, **kwargs) -> None:
         '''
         Construct a XGBoost based imputation method.
@@ -109,8 +106,6 @@ class XGBOOST(BaseImputer):
                          It includes parameters for model configuration or training criteria 
                          (See: https://xgboost.readthedocs.io/en/stable/python/python_api.html#xgboost.XGBRegressor )
         '''
-        
-        super().__init__(device=device)
         
         self.num_models = num_models    
         self.models = {}
@@ -174,7 +169,7 @@ class XGBOOST(BaseImputer):
         pass
 
     
-class SVM(BaseImputer):
+class SVM:
     def __init__(self, num_models: int, device: Optional[Union[str, torch.device, list]] = None, **kwargs) -> None:
         '''
         Construct a SVM based imputation method.
@@ -185,8 +180,6 @@ class SVM(BaseImputer):
                          It includes parameters for model configuration or training criteria 
                          (See: https://scikit-learn.org/stable/modules/generated/sklearn.svm.SVR.html#sklearn.svm.SVR)
         '''
-        
-        super().__init__(device=device)
         
         self.num_models = num_models    
         self.models = {}

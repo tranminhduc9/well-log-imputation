@@ -10,6 +10,8 @@ import torch
 import os
 import numpy as np
 import json
+import warnings
+from copy import deepcopy
 
 from sklearn.preprocessing import StandardScaler
 from tqdm.notebook import tqdm
@@ -23,9 +25,8 @@ from data import DatasetForImputation
 from .neuralnet import _reconstruction_loss
 
 from pypots.imputation.base import BaseNNImputer
-from pypots.data.base import BaseDataset
 from pypots.utils.logging import logger
-from pypots.utils.metrics import cal_mae
+from pypots.utils.metrics import calc_mae
 from pypots.optim import Adam, AdamW
 
 
@@ -175,7 +176,7 @@ class UNet(BaseNNImputer):
                     imputation_collector = torch.cat(imputation_collector)
                     imputation_collector = imputation_collector.moveaxis(1, -1).cpu().detach().numpy()
 
-                    mean_val_loss = cal_mae(
+                    mean_val_loss = calc_mae(
                         imputation_collector,
                         val_loader.dataset.X_intact.numpy(),
                         val_loader.dataset.indicating_mask.numpy(),
@@ -200,13 +201,8 @@ class UNet(BaseNNImputer):
 
                 if mean_loss < self.best_loss:
                     self.best_loss = mean_loss
-                    self.best_model_dict = self.model.state_dict()
+                    self.best_model_dict = deepcopy(self.model.state_dict())
                     self.patience = self.original_patience
-                    # save the model if necessary
-                    self._auto_save_model_if_necessary(
-                        training_finished=False,
-                        saving_name=f"{self.__class__.__name__}_epoch{epoch}_loss{mean_loss}",
-                    )
                 else:
                     self.patience -= 1
 
@@ -228,14 +224,15 @@ class UNet(BaseNNImputer):
                     "Training got interrupted. Model was not trained. Please investigate the error printed above."
                 )
             else:
-                RuntimeWarning(
+                warnings.warn(
                     "Training got interrupted. Please investigate the error printed above.\n"
                     "Model got trained and will load the best checkpoint so far for testing.\n"
-                    "If you don't want it, please try fit() again."
+                    "If you don't want it, please try fit() again.",
+                    RuntimeWarning,
                 )
 
-        if np.equal(self.best_loss.item(), float("inf")):
-            raise ValueError("Something is wrong. best_loss is Nan after training.")
+        if not np.isfinite(float(self.best_loss)):
+            raise ValueError("Something is wrong. best_loss is not finite after training.")
 
         logger.info("Finished training.")
         
@@ -277,7 +274,7 @@ class UNet(BaseNNImputer):
         self.model.eval()  # set the model as eval status to freeze it.
 
         # Step 3: save the model if necessary
-        self._auto_save_model_if_necessary(training_finished=True)
+        self._auto_save_model_if_necessary(confirm_saving=True)
 
 
     def predict(self, test_set: dict[str, np.ndarray | torch.Tensor], file_type: str = "h5py") -> dict[str, np.ndarray]:

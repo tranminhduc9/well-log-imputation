@@ -2,16 +2,10 @@
 Evaluation metrics related to error calculation (like in tasks regression, imputation etc).
 """
 
-from typing import Union, Optional
 import numpy as np
-import torch
 from sklearn import metrics
-from scipy.spatial import distance
 
-def cal_r2(class_predictions: Union[np.ndarray, torch.Tensor],
-           targets: Union[np.ndarray, torch.Tensor],
-           masks: Optional[Union[np.ndarray, torch.Tensor]] = None,
-          ) -> Union[float, torch.Tensor]:
+def cal_r2(class_predictions, targets, masks):
     '''
     Calculate the R-squared Error between ``class_predictions`` and ``targets``.
     ``masks`` can be used for filtering. For values==0 in ``masks``,
@@ -23,16 +17,12 @@ def cal_r2(class_predictions: Union[np.ndarray, torch.Tensor],
                   When given, only values at corresponding positions where values ==1 in ``masks`` will be used for evaluation.
     '''
 
-    R2 = metrics.r2_score(targets.flatten(), class_predictions.flatten(), sample_weight=masks.flatten())
+    mask = masks.astype(bool)
+    return metrics.r2_score(targets[mask], class_predictions[mask])
 
-    return R2
-
-def cal_cc(class_predictions: Union[np.ndarray, torch.Tensor],
-           targets: Union[np.ndarray, torch.Tensor],
-           masks: Optional[Union[np.ndarray, torch.Tensor]] = None,
-          ) -> Union[float, torch.Tensor]:
+def cal_cc(class_predictions, targets, masks):
     '''
-    Calculate the Correlation Distance (=1 - Correlation) between ``class_predictions`` and ``targets``.
+    Calculate the Pearson correlation coefficient between ``class_predictions`` and ``targets``.
     ``masks`` can be used for filtering. For values==0 in ``masks``,
     values at their corresponding positions in ``predictions`` will be ignored.
 
@@ -42,6 +32,16 @@ def cal_cc(class_predictions: Union[np.ndarray, torch.Tensor],
                   When given, only values at corresponding positions where values ==1 in ``masks`` will be used for evaluation.
     '''
 
-    CC = distance.correlation(targets.flatten(), class_predictions.flatten(), w=masks.flatten())
+    mask = masks.astype(bool)
+    class_predictions = class_predictions[mask]
+    targets = targets[mask]
 
-    return CC
+    # Pearson correlation is undefined for fewer than two values or a constant
+    # vector. Treat that degenerate prediction as no correlation instead of
+    # propagating NaN through all fold summaries.
+    if class_predictions.size < 2:
+        return 0.0
+    if np.isclose(np.std(class_predictions), 0) or np.isclose(np.std(targets), 0):
+        return 0.0
+
+    return float(np.corrcoef(targets, class_predictions)[0, 1])

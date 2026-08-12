@@ -8,13 +8,18 @@ The goal of the benchmark is to introduce a standard evaluation protocol to any 
 The code is mainly built using the [PyTorch](https://pytorch.org/) deep learning library and the [PyPOTS](https://pypots.com/) module.
 
 ### Requirements
-The exact versions of PyTorch and PyPOTS used were:
+The environment is tested with Python 3.12.x and the current Kaggle runtime.
+Install the complete dependency set from `requirements.txt`. The core versions are:
 ```
-pypots==0.1.4
-torch==2.1.0a0+29c30b1
+pypots==0.3.2
+torch>=2.10
 ```
-Installing them with pip should download their correct dependencies.
-Newer versions of both libraries will probably also work.
+PyPOTS 0.3.2 is used because it supports pandas 2.x while retaining the APIs
+used by this benchmark. Broad lower bounds for the scientific stack allow
+Kaggle to keep its preinstalled, CUDA-compatible packages.
+
+The benchmark uses a GPU by default and automatically falls back to CPU when
+CUDA is unavailable. Use `--device cpu` to force CPU.
 
 ## Repository content and organization
 

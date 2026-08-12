@@ -9,10 +9,9 @@ import os
 import time
 import logging
 
-from pypots.utils.metrics import cal_mae, cal_mse, cal_rmse
-from utils.metrics import cal_r2, cal_cc
-from pypots.optim import Adam, AdamW
+from pypots.utils.metrics import calc_mae, calc_mse, calc_rmse
 from pypots.utils.random import set_random_seed
+from utils.metrics import cal_r2, cal_cc
 
 import models
 from data import mask_X
@@ -21,12 +20,17 @@ def select_optimizer(optimizer: str, lr: float):
     '''
     Returns and enveloped optimizer from the pypots with the desired learning rate.
     '''
+    # Import PyPOTS only for neural models. Classical models do not need its
+    # optional graph stack (torch_geometric/torch_scatter).
+    from pypots.optim import Adam, AdamW
+
     if optimizer == 'adam':
         return Adam(lr = lr)
     if optimizer == 'adamw':
         return AdamW(lr = lr)
     
     return Adam(lr = lr)
+
 
 def loading_data(dataset_name: str, data_dir: str, fold: int) -> tuple[np.array, np.array]:
     '''
@@ -131,7 +135,7 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
     init_time = time.time()
 
     # 
-    for fold in range(cfg.n_folds):
+    for fold in range(n_folds):
         ## instantiate a new model
         model = model_fn.instantiate()
         
@@ -163,7 +167,7 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
 
         ## Train the model on the training set, and validate it on the validating set to select the best model for testing in the next step
 
-        if model_name != 'LOCF' and model_name != 'MEAN': ## LOCF and MEAN doesn't need to be trained
+        if model_name.lower() not in {'locf', 'mean'}: ## LOCF and MEAN don't need to be trained
             print('training model in training set and tracking performance in validation set..')
             logging.info('training model in training set and tracking performance in validation set..')
             model.fit(train_set=dataset_for_training, val_set=dataset_for_validating['rand'])
@@ -187,9 +191,9 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
             model_imputation = model.predict(dataset_for_validating[mode])
 
             ## Calculate metrics on the ground truth (artificially-missing values):
-            val_mae = cal_mae(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
-            val_mse = cal_mse(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
-            val_rmse = cal_rmse(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
+            val_mae = calc_mae(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
+            val_mse = calc_mse(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
+            val_rmse = calc_rmse(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
             val_r2 = cal_r2(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
             val_cc = cal_cc(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
             
@@ -244,7 +248,8 @@ def main(cfg):
     
     # Model setup
     ## define optimizer
-    optim = select_optimizer(cfg.optimizer, cfg.lr)
+    neural_models = {'saits', 'transformer', 'brits', 'mrnn', 'unet', 'ae'}
+    optim = select_optimizer(cfg.optimizer, cfg.lr) if cfg.model in neural_models else None
     
     ## define instantiate model function
     model = models.Factory(cfg.model,

@@ -5,19 +5,10 @@ init script for models:
 
 import os
 
-# Our implementations/Encapsulations
-from .shallow import RF, XGBOOST, SVM
-from .unet import UNet
-from .autoencoder import AENet
-
-# Pypots models
-from pypots.imputation import SAITS, Transformer, BRITS, MRNN, LOCF
-from pypots.optim import Adam, AdamW
-
 class Factory:
     def __init__(self, model: str, seq_len: int = 256, n_features: int = 4, 
                 batch_size:int  = 32, epochs: int  = 50, patience: int = 15, 
-                optimizer: Adam|AdamW = Adam(lr=1e-3), 
+                optimizer = None,
                 device: str = 'cpu', output_dir: str = '.') -> None:
         '''
         Factory class. It is used to colect and to setup the instantion function of the different models.
@@ -59,6 +50,7 @@ class Factory:
     
     @staticmethod
     def instantiate_SAITS(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from pypots.imputation import SAITS
         
         saits = SAITS(n_steps = seq_len,
                       n_features = n_features,
@@ -87,6 +79,7 @@ class Factory:
     
     @staticmethod
     def instantiate_TRANSFORMER(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from pypots.imputation import Transformer
         
         transformer = Transformer(n_steps = seq_len,
                                   n_features = n_features,
@@ -113,6 +106,7 @@ class Factory:
     
     @staticmethod
     def instantiate_BRITS(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from pypots.imputation import BRITS
         
         brits = BRITS(n_steps = seq_len,
                       n_features = n_features,
@@ -131,6 +125,7 @@ class Factory:
     
     @staticmethod
     def instantiate_MRNN(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from pypots.imputation import MRNN
         
         mrnn = MRNN(n_steps = seq_len,
                     n_features = n_features,
@@ -149,6 +144,7 @@ class Factory:
     
     @staticmethod
     def instantiate_LOCF(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from pypots.imputation import LOCF
         
         locf = LOCF(
                     first_step_imputation="zero"  # fill leading missing values, which cannot use LOCF
@@ -158,6 +154,7 @@ class Factory:
     
     @staticmethod
     def instantiate_UNET(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from .unet import UNet
         
         unet = UNet(n_features = n_features,
                     spatial_dims = 1,
@@ -178,6 +175,7 @@ class Factory:
     
     @staticmethod
     def instantiate_AE(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from .autoencoder import AENet
         
         ae = AENet(n_features=n_features,
                    input_size=seq_len,
@@ -201,6 +199,7 @@ class Factory:
     
     @staticmethod
     def instantiate_RF(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from .shallow import RF
         # Hyperparameters from: Synthetic geochemical well logs generation using ensemble machine learning techniques for the Brazilian pre-salt reservoirs
         # de Oliveira, Lucas Abreu Blanes and de Carvalho Carneiro, Cleyton, [2021]
         rf = RF(n_features,
@@ -215,6 +214,7 @@ class Factory:
     
     @staticmethod
     def instantiate_XGBOOST(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from .shallow import XGBOOST
         # Hyperparameters from: Synthetic geochemical well logs generation using ensemble machine learning techniques for the Brazilian pre-salt reservoirs
         # de Oliveira, Lucas Abreu Blanes and de Carvalho Carneiro, Cleyton, [2021]
         xgboost = XGBOOST(n_features,
@@ -232,6 +232,7 @@ class Factory:
     
     @staticmethod
     def instantiate_SVM(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from .shallow import SVM
         # Hyperparameters from: Synthetic geochemical well logs generation using ensemble machine learning techniques for the Brazilian pre-salt reservoirs
         # de Oliveira, Lucas Abreu Blanes and de Carvalho Carneiro, Cleyton, [2021]
         svm = SVM(n_features,
@@ -255,7 +256,7 @@ class Factory:
     
 def instantiate(model: str, seq_len: int = 256, n_features: int = 4, 
                 batch_size:int  = 32, epochs: int  = 50, patience: int = 15, 
-                optimizer: Adam|AdamW = Adam(lr=1e-3), 
+                optimizer = None,
                 device: str = 'cpu', output_dir: str = '.') -> Factory:
     '''
     Functional version of the Factory class. See above

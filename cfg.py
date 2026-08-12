@@ -3,11 +3,8 @@ Config class: It is used to setup the paramenters to run the imputation benchmar
               During parsing, do some checks and generate the experiments list to be executed
 '''
 
-import os
 from pathlib import Path
-from argparse import ArgumentParser, Namespace
-import random
-import numpy as np
+from argparse import ArgumentParser
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -53,6 +50,7 @@ class Configs:
         parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate used in the optimizer")  # (Not used by shallow/classical methods)   
         parser.add_argument("--optimizer", type=str.lower, default='adam', choices=['adam', 'adamw'], 
                             help="Name of the optimizer used in training") # (Not used by shallow/classical methods) 
+        parser.add_argument("--device", type=str.lower, default="gpu", choices=["gpu", "cpu"])
         
         
         self.parser = parser
@@ -71,8 +69,9 @@ class Configs:
             print(f"The provided dataset path `{args.dataset_dir}` does not exist. Aborting program execution.")
             exit()
         
-        # setup torch device
-        args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # PyTorch calls the GPU device "cuda". Fall back to CPU when unavailable.
+        args.device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
+        print(f"Using compute device: {args.device}")
         
         # number of features in the data
         args.n_features = len(args.logs)

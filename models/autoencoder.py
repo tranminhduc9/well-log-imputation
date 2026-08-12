@@ -6,6 +6,8 @@ See an example of implementation: https://github.com/WenjieDu/PyPOTS/blob/main/p
 import torch
 import os
 import numpy as np
+import warnings
+from copy import deepcopy
 
 from torch.utils.data import DataLoader
 from .neuralnet import AENN
@@ -13,7 +15,6 @@ from .neuralnet import AENN
 from data import DatasetForImputation
 
 from pypots.imputation.base import BaseNNImputer
-from pypots.data.base import BaseDataset
 from pypots.utils.logging import logger
 from pypots.optim import Adam, AdamW
 
@@ -207,13 +208,8 @@ class AENet(BaseNNImputer):
 
                 if mean_loss < self.best_loss:
                     self.best_loss = mean_loss
-                    self.best_model_dict = self.model.state_dict()
+                    self.best_model_dict = deepcopy(self.model.state_dict())
                     self.patience = self.original_patience
-                    # save the model if necessary
-                    self._auto_save_model_if_necessary(
-                        training_finished=False,
-                        saving_name=f"{self.__class__.__name__}_epoch{epoch}_loss{mean_loss}",
-                    )
                 else:
                     self.patience -= 1
 
@@ -235,14 +231,15 @@ class AENet(BaseNNImputer):
                     "Training got interrupted. Model was not trained. Please investigate the error printed above."
                 )
             else:
-                RuntimeWarning(
+                warnings.warn(
                     "Training got interrupted. Please investigate the error printed above.\n"
                     "Model got trained and will load the best checkpoint so far for testing.\n"
-                    "If you don't want it, please try fit() again."
+                    "If you don't want it, please try fit() again.",
+                    RuntimeWarning,
                 )
 
-        if np.equal(self.best_loss.item(), float("inf")):
-            raise ValueError("Something is wrong. best_loss is Nan after training.")
+        if not np.isfinite(float(self.best_loss)):
+            raise ValueError("Something is wrong. best_loss is not finite after training.")
 
         logger.info("Finished training.")
         
@@ -284,7 +281,7 @@ class AENet(BaseNNImputer):
         self.model.eval()  # set the model as eval status to freeze it.
 
         # Step 3: save the model if necessary
-        self._auto_save_model_if_necessary(training_finished=True)
+        self._auto_save_model_if_necessary(confirm_saving=True)
 
 
     def predict(self, test_set: dict[str, np.ndarray | torch.Tensor], file_type: str = "h5py") -> dict[str, np.ndarray]:
