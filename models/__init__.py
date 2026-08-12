@@ -151,7 +151,7 @@ class Factory:
     def instantiate_LOCF(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
         
         locf = LOCF(
-                    nan = 0  # set the value used to impute data missing at the beginning of the sequence, those cannot use LOCF mechanism to impute
+                    first_step_imputation="zero"  # fill leading missing values, which cannot use LOCF
                    )
         
         return locf
