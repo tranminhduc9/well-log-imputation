@@ -27,9 +27,9 @@ class Configs:
         
         # experiment setup (Not used by shallow/classical methods)
         parser.add_argument("--slice_len", type=int, default=256, help="Length (number of samples) of the training/validation sequences")
-        parser.add_argument("--epochs", type=int, default=1000, help="Total of training epochs.")
-        parser.add_argument("--patience", type=int, default=1000, 
-                            help="Number of patience epochs. Aborts training if validation score do not improve in this number of epochs.")
+        parser.add_argument("--epochs", type=int, default=300, help="Maximum number of training epochs.")
+        parser.add_argument("--patience", type=int, default=15,
+                            help="Early-stopping patience. Aborts training if validation loss does not improve for this number of consecutive epochs.")
         parser.add_argument("--batch_size", type=int, default=32, help="Number of sequences in each training batch")
         
         # experiment missing pattern setup
