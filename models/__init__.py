@@ -223,10 +223,14 @@ class Factory:
 
         return QuantileRandomForest(
             n_features,
-            n_estimators=200,
-            max_depth=None,
-            min_samples_leaf=2,
-            min_samples_split=2,
+            # CPU-friendly baseline. QRF trains one forest per feature, so
+            # unrestricted 200-tree forests are prohibitively expensive on
+            # the full set of depth samples.
+            n_estimators=100,
+            max_depth=20,
+            min_samples_leaf=5,
+            min_samples_split=10,
+            max_samples=0.5,
             n_jobs=-1,
             random_state=17076,
         )
@@ -237,14 +241,18 @@ class Factory:
 
         return BayesianNNImputer(
             num_models=n_features,
-            batch_size=batch_size,
+            # BayesNN flattens sequences into individual depth points. The
+            # global batch size of 32 is intended for full sequences and is
+            # prohibitively small here.
+            batch_size=max(batch_size, 2048),
             epochs=epochs,
             patience=patience,
             device=device,
             learning_rate=1e-3,
             hidden_size=64,
             dropout=0.15,
-            mc_samples=50,
+            mc_samples=30,
+            min_delta=1e-4,
         )
 
     @staticmethod

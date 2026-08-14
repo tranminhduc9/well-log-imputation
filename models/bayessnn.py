@@ -41,6 +41,7 @@ class BayesianNNImputer:
         dropout: float = 0.15,
         mc_samples: int = 50,
         prediction_batch_size: int = 8192,
+        min_delta: float = 1e-4,
         lower_quantile: float = 0.05,
         upper_quantile: float = 0.95,
     ) -> None:
@@ -53,6 +54,7 @@ class BayesianNNImputer:
         self.dropout = dropout
         self.mc_samples = mc_samples
         self.prediction_batch_size = prediction_batch_size
+        self.min_delta = min_delta
         self.lower_quantile = lower_quantile
         self.upper_quantile = upper_quantile
         requested = str(device or "cpu")
@@ -91,24 +93,33 @@ class BayesianNNImputer:
             train_x, val_x = (train_x - x_mean) / x_std, (val_x - x_mean) / x_std
             train_y, val_y = (train_y - y_mean) / y_std, (val_y - y_mean) / y_std
 
+            pin_memory = self.device.type == "cuda"
             train_loader = DataLoader(
                 TensorDataset(torch.from_numpy(train_x), torch.from_numpy(train_y.astype(np.float32))),
                 batch_size=self.batch_size, shuffle=True,
+                pin_memory=pin_memory,
             )
             val_loader = DataLoader(
                 TensorDataset(torch.from_numpy(val_x), torch.from_numpy(val_y.astype(np.float32))),
                 batch_size=max(self.batch_size, 1024), shuffle=False,
+                pin_memory=pin_memory,
             )
             model = _BayesianRegressor(
                 self.num_models - 1, self.hidden_size, self.dropout
             ).to(self.device)
             optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
             best_loss, best_state, remaining_patience = float("inf"), None, self.patience
+            print(
+                f"BayesNN feature {target + 1}/{self.num_models}: "
+                f"{len(train_y):,} train points, batch size {self.batch_size}",
+                flush=True,
+            )
 
             for epoch in range(self.epochs):
                 model.train()
                 for batch_x, batch_y in train_loader:
-                    batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
+                    batch_x = batch_x.to(self.device, non_blocking=pin_memory)
+                    batch_y = batch_y.to(self.device, non_blocking=pin_memory)
                     optimizer.zero_grad()
                     mean, log_variance = model(batch_x)
                     loss = self._gaussian_nll(mean, log_variance, batch_y)
@@ -119,19 +130,27 @@ class BayesianNNImputer:
                 total_loss, total_items = 0.0, 0
                 with torch.no_grad():
                     for batch_x, batch_y in val_loader:
-                        batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
+                        batch_x = batch_x.to(self.device, non_blocking=pin_memory)
+                        batch_y = batch_y.to(self.device, non_blocking=pin_memory)
                         mean, log_variance = model(batch_x)
                         loss = self._gaussian_nll(mean, log_variance, batch_y)
                         total_loss += float(loss) * len(batch_y)
                         total_items += len(batch_y)
                 val_loss = total_loss / total_items
-                if np.isfinite(val_loss) and val_loss < best_loss:
+                improved = np.isfinite(val_loss) and val_loss < best_loss - self.min_delta
+                if improved:
                     best_loss, best_state = val_loss, deepcopy(model.state_dict())
                     remaining_patience = self.patience
                 else:
                     remaining_patience -= 1
-                    if remaining_patience == 0:
-                        break
+                if epoch == 0 or (epoch + 1) % 10 == 0 or remaining_patience == 0:
+                    print(
+                        f"  epoch {epoch + 1}/{self.epochs} - val NLL: {val_loss:.6f} "
+                        f"- patience left: {remaining_patience}",
+                        flush=True,
+                    )
+                if remaining_patience == 0:
+                    break
 
             if best_state is None:
                 raise RuntimeError(f"BayesNN feature {target} produced no finite validation loss.")
@@ -141,6 +160,11 @@ class BayesianNNImputer:
             logging.info(
                 "BayesNN feature %d stopped at epoch %d with validation NLL %.6f",
                 target, epoch + 1, best_loss,
+            )
+            print(
+                f"BayesNN feature {target + 1}/{self.num_models} finished at "
+                f"epoch {epoch + 1}; best val NLL: {best_loss:.6f}",
+                flush=True,
             )
 
     def _posterior_quantile_batch(self, target: int, x: np.ndarray):
