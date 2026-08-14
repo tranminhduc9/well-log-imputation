@@ -6,10 +6,10 @@ init script for models:
 import os
 
 class Factory:
-    def __init__(self, model: str, seq_len: int = 256, n_features: int = 4, 
-                batch_size:int  = 32, epochs: int  = 50, patience: int = 15, 
-                optimizer = None,
-                device: str = 'cpu', output_dir: str = '.') -> None:
+    def __init__(self, model: str, seq_len: int = 256, n_features: int = 4,
+                batch_size:int = 32, epochs: int = 50, patience: int = 15,
+                optimizer = None, device: str = 'cpu', output_dir: str = '.',
+                learning_rate: float = 1e-3) -> None:
         '''
         Factory class. It is used to colect and to setup the instantion function of the different models.
         Unless specified, the hyperparameter were empirically selected.
@@ -24,15 +24,16 @@ class Factory:
         @param optimizer: an optimizer object                                                                     # Not used by shallow/classical methods
         @param device: the device used for training. (cpu or cuda usually)                                        # Not used by shallow/classical methods
         @param output_dir: the path where model weights and trainig logs are saved
+        @param learning_rate: learning rate for repository-native neural models
         '''
         
         
         assert model in ['locf', 'mean', # classical (mean not implemented)
-                         'rf', 'xgboost', 'svm', # shallow (encapsulation of sklearn implementation)
+                         'rf', 'qrf', 'quantilerf', 'xgboost', 'svm', # shallow/ensemble methods
                          'saits', 'transformer', # attenttion time-series (pypots implementation)
                          'brits', 'mrnn', # rnn time-series (pypots implementation)
                          'unet', # cnn based method (monai backbone implementation)
-                         'ae', # autoencoder with mlp (fully-connected) (our implementation)
+                         'ae', 'bayesnn', 'bayessnn', # neural methods implemented in this repository
                         ]
         
         self.model = model
@@ -42,11 +43,15 @@ class Factory:
         self.epochs = epochs
         self.patience = patience
         self.optimizer = optimizer
+        self.learning_rate = learning_rate
         self.device = device
         self.output_dir = output_dir
     
     def instantiate(self):
-        return getattr(self, f"instantiate_{self.model.upper()}")(self.seq_len, self.n_features, self.batch_size, self.epochs, self.patience, self.optimizer, self.device, self.output_dir)
+        model = getattr(self, f"instantiate_{self.model.upper()}")(self.seq_len, self.n_features, self.batch_size, self.epochs, self.patience, self.optimizer, self.device, self.output_dir)
+        if self.model in {'bayesnn', 'bayessnn'}:
+            model.learning_rate = self.learning_rate
+        return model
     
     @staticmethod
     def instantiate_SAITS(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
@@ -211,6 +216,44 @@ class Factory:
                )
     
         return rf
+
+    @staticmethod
+    def instantiate_QRF(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from .quantilerf import QuantileRandomForest
+
+        return QuantileRandomForest(
+            n_features,
+            n_estimators=200,
+            max_depth=None,
+            min_samples_leaf=2,
+            min_samples_split=2,
+            n_jobs=-1,
+            random_state=17076,
+        )
+
+    @staticmethod
+    def instantiate_BAYESNN(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from .bayessnn import BayesianNNImputer
+
+        return BayesianNNImputer(
+            num_models=n_features,
+            batch_size=batch_size,
+            epochs=epochs,
+            patience=patience,
+            device=device,
+            learning_rate=1e-3,
+            hidden_size=64,
+            dropout=0.15,
+            mc_samples=50,
+        )
+
+    @staticmethod
+    def instantiate_QUANTILERF(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        return Factory.instantiate_QRF(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir)
+
+    @staticmethod
+    def instantiate_BAYESSNN(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        return Factory.instantiate_BAYESNN(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir)
     
     @staticmethod
     def instantiate_XGBOOST(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):

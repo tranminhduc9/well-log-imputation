@@ -85,20 +85,22 @@ python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds
 | `--dataset_dir`     |            'preprocessed_data' | Path to the processed dataset (the folder that contains the .npy files)                                                                                                                     |
 | `--logs`            |  ['GR', 'DTC', 'RHOB', 'NPHI'] | List of the logs present in the processed dataset <br /> (the order in the list is assumed as the same order of logs in  the stored processed slices)                                              |
 | `--slice_len`       |                            256 | Length of the sliced sequences of the processed dataset                                                                                                                                     |
-| `--epochs`          |                            300 | Maximum number of training epochs for deep methods                                                                                                                                          |
-| `--patience`        |                             15 | Early-stopping patience. If validation loss does not improve for this number of consecutive epochs, training is aborted                                                                      |
+| `--epochs`          |                            500 | Maximum number of training epochs for deep methods                                                                                                                                          |
+| `--patience`        |                             10 | Early-stopping patience. If validation loss does not improve for this number of consecutive epochs, training is aborted                                                                      |
 | `--batch_size`      |                             32 | Size of training batch                                                                                                                                                                      |
 | `--missing_pattern` | ['single', 'block', 'profile'] | List of missing patterns to be tested. <br />  - Single: independently selects random samples <br /> - Block: randomly select contiguous block of samples <br /> - Profile: mask an entire log of a sequence  |
 | `--n_points`        |                            [1] | List of possible individual samples to be masked. Defaults to 1, larger integers imply multiple random indices independently selected per sequence to be masked                          |
 | `--blocks_size`     |                      [20, 100] | List of possible block lengths to be masked. Each value creates a new experiment                                                                                                         |
 | `--profiles`        |                       ['RAND'] | List of logs to be masked, if 'profile' is one of the tested missing patterns (when 'RAND', each test sequence has a random log masked)                                                    |
-| `--model`           |                        'saits' | Name of the model to be evaluated <br /> (options: 'locf', 'rf', 'xgboost', 'svm', 'saits', 'transformer','brits', 'mrnn','unet', 'ae')                                                            |
+| `--model`           |                        'saits' | Name of the model to be evaluated <br /> (includes uncertainty-aware `qrf` and `bayesnn`)                                                                                                  |
 | `--lr`              |                           1e-3 | Learning rate used in the optimizer                                                                                                                                                         |
 | `--optimizer`       |                         'adam' | Name of the optimizer used in training (either 'adam' or 'adamw')                                                                                                                            |
 
 ### Available models
 - 'locf': Last Observation Carry Forward
 - 'rf': Random Forest [[source]](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestRegressor.html#sklearn.ensemble.RandomForestRegressor)
+- 'qrf' (alias: 'quantilerf'): Quantile Random Forest (tree-distribution 5th/50th/95th percentiles)
+- 'bayesnn' (alias: 'bayessnn'): Bayesian neural network approximation using heteroscedastic Gaussian output and MC Dropout
 - 'xgboost': XGBoost Regressor [[source]](https://xgboost.readthedocs.io/en/stable/python/python_api.html#xgboost.XGBRegressor)
 - 'svm': Support Vector Regressor [[source]](https://scikit-learn.org/stable/modules/generated/sklearn.svm.SVR.html#sklearn.svm.SVR)
 - 'saits': SAITS (Self-Attention Imputation Time Series) [[source]](https://github.com/WenjieDu/PyPOTS/tree/main/pypots/imputation/saits) [[paper]](https://arxiv.org/pdf/2202.08516)

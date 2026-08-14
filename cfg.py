@@ -27,8 +27,8 @@ class Configs:
         
         # experiment setup (Not used by shallow/classical methods)
         parser.add_argument("--slice_len", type=int, default=256, help="Length (number of samples) of the training/validation sequences")
-        parser.add_argument("--epochs", type=int, default=300, help="Maximum number of training epochs.")
-        parser.add_argument("--patience", type=int, default=15,
+        parser.add_argument("--epochs", type=int, default=500, help="Maximum number of training epochs.")
+        parser.add_argument("--patience", type=int, default=10,
                             help="Early-stopping patience. Aborts training if validation loss does not improve for this number of consecutive epochs.")
         parser.add_argument("--batch_size", type=int, default=32, help="Number of sequences in each training batch")
         
@@ -41,11 +41,11 @@ class Configs:
         
         # model setup 
         parser.add_argument("--model", type=str.lower, default="saits", choices=['locf', 'mean', # classical (mean not implemented)
-                                                                                 'rf', 'xgboost', 'svm', # shallow (encapsulations of sklearn implementation)
+                                                                                 'rf', 'qrf', 'quantilerf', 'xgboost', 'svm', # shallow/ensemble methods
                                                                                  'saits', 'transformer', # attenttion time-series (pypots implementation)
                                                                                  'brits', 'mrnn', # rnn time-series (pypots implementation)
                                                                                  'unet', # cnn based method (monai backbone implementation)
-                                                                                 'ae', # autoencoder with mlp (fully-connected) (our implementation)
+                                                                                 'ae', 'bayesnn', 'bayessnn', # neural methods implemented in this repository
                                                                                  ])
         parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate used in the optimizer")  # (Not used by shallow/classical methods)   
         parser.add_argument("--optimizer", type=str.lower, default='adam', choices=['adam', 'adamw'], 

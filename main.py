@@ -207,6 +207,48 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
             val_rmse = calc_rmse(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
             val_r2 = cal_r2(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
             val_cc = cal_cc(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
+
+            # Uncertainty-aware models additionally return a lower and upper
+            # predictive bound. Evaluate and persist only artificially masked
+            # positions so the artifacts stay compact.
+            if {'lower', 'upper'} <= model_imputation.keys():
+                uncertainty_mask = dataset_for_validating[mode]['indicating_mask'].astype(bool)
+                truth = dataset_for_validating[mode]['X_intact'][uncertainty_mask]
+                point = model_imputation['imputation'][uncertainty_mask]
+                lower = model_imputation['lower'][uncertainty_mask]
+                upper = model_imputation['upper'][uncertainty_mask]
+                finite = (
+                    np.isfinite(truth) & np.isfinite(point)
+                    & np.isfinite(lower) & np.isfinite(upper)
+                )
+                if not np.any(finite):
+                    raise ValueError(
+                        f'No finite uncertainty predictions for fold {fold}, mode {mode}.'
+                    )
+                truth, point, lower, upper = (
+                    values[finite] for values in (truth, point, lower, upper)
+                )
+                val_picp = float(np.mean((truth >= lower) & (truth <= upper)))
+                val_mpiw = float(np.mean(upper - lower))
+                picp_key = f'validation-picp-{mode}'
+                mpiw_key = f'validation-mpiw-{mode}'
+                metrics[model_name].setdefault(picp_key, []).append(val_picp)
+                metrics[model_name].setdefault(mpiw_key, []).append(val_mpiw)
+
+                uncertainty_dir = os.path.join(model_fn.output_dir, 'uncertainty')
+                os.makedirs(uncertainty_dir, exist_ok=True)
+                safe_mode = mode.replace('.', '_')
+                np.savez_compressed(
+                    os.path.join(
+                        uncertainty_dir,
+                        f'{model_name}_{dataset_name}_fold_{fold}_{safe_mode}.npz',
+                    ),
+                    indices=np.argwhere(uncertainty_mask)[finite],
+                    target=truth,
+                    prediction=point,
+                    lower=lower,
+                    upper=upper,
+                )
             
             print(f'masking {mode} testing mean absolute error:{val_mae:.4f}')
             logging.info(f'masking {mode} testing mean absolute error:{val_mae:.4f}')
@@ -218,6 +260,11 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
             logging.info(f'masking {mode} testing r2:{val_r2:.4f}')
             print(f'masking {mode} testing correlation:{val_cc:.4f}')
             logging.info(f'masking {mode} testing correlation:{val_cc:.4f}')
+            if {'lower', 'upper'} <= model_imputation.keys():
+                print(f'masking {mode} prediction interval coverage (PICP):{val_picp:.4f}')
+                logging.info(f'masking {mode} prediction interval coverage (PICP):{val_picp:.4f}')
+                print(f'masking {mode} mean prediction interval width (MPIW):{val_mpiw:.4f}')
+                logging.info(f'masking {mode} mean prediction interval width (MPIW):{val_mpiw:.4f}')
 
             ## Save metrics for the model:
             metrics[model_name][f'inference-time-{mode}'].append(inference_time_secs)
@@ -272,6 +319,7 @@ def main(cfg):
                            epochs = cfg.epochs, 
                            patience = cfg.patience, 
                            optimizer = optim, 
+                           learning_rate = cfg.lr,
                            device = cfg.device, 
                            output_dir = cfg.output_dir)
     
