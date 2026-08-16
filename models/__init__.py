@@ -33,7 +33,7 @@ class Factory:
                          'saits', 'transformer', # attenttion time-series (pypots implementation)
                          'brits', 'mrnn', # rnn time-series (pypots implementation)
                          'unet', # cnn based method (monai backbone implementation)
-                         'ae', 'bayesnn', 'bayessnn', # neural methods implemented in this repository
+                         'ae', 'bayesnn', 'bayessnn', 'anp', # neural methods implemented in this repository
                         ]
         
         self.model = model
@@ -49,7 +49,7 @@ class Factory:
     
     def instantiate(self):
         model = getattr(self, f"instantiate_{self.model.upper()}")(self.seq_len, self.n_features, self.batch_size, self.epochs, self.patience, self.optimizer, self.device, self.output_dir)
-        if self.model in {'bayesnn', 'bayessnn'}:
+        if self.model in {'bayesnn', 'bayessnn', 'anp'}:
             model.learning_rate = self.learning_rate
         return model
     
@@ -262,6 +262,23 @@ class Factory:
     @staticmethod
     def instantiate_BAYESSNN(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
         return Factory.instantiate_BAYESNN(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir)
+
+    @staticmethod
+    def instantiate_ANP(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):
+        from .neuralprocess import AttentionNeuralProcess
+
+        return AttentionNeuralProcess(
+            n_steps=seq_len,
+            n_features=n_features,
+            hidden_dim=128,
+            latent_dim=32,
+            n_heads=4,
+            batch_size=batch_size,
+            epochs=epochs,
+            patience=patience,
+            device=device,
+            saving_path=os.path.join(output_dir, 'anp'),
+        )
     
     @staticmethod
     def instantiate_XGBOOST(seq_len, n_features, batch_size, epochs, patience, optimizer, device, output_dir):

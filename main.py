@@ -208,6 +208,29 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
             val_r2 = cal_r2(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
             val_cc = cal_cc(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
 
+            # Persist compact point-prediction artifacts for downstream log-curve
+            # visualization. Only artificially masked, finite values are stored.
+            prediction_mask = dataset_for_validating[mode]['indicating_mask'].astype(bool)
+            prediction_target = dataset_for_validating[mode]['X_intact'][prediction_mask]
+            prediction_point = model_imputation['imputation'][prediction_mask]
+            prediction_finite = np.isfinite(prediction_target) & np.isfinite(prediction_point)
+            if not np.any(prediction_finite):
+                raise ValueError(
+                    f'No finite point predictions for fold {fold}, mode {mode}.'
+                )
+            prediction_dir = os.path.join(model_fn.output_dir, 'predictions')
+            os.makedirs(prediction_dir, exist_ok=True)
+            safe_mode = mode.replace('.', '_')
+            np.savez_compressed(
+                os.path.join(
+                    prediction_dir,
+                    f'{model_name}_{dataset_name}_fold_{fold}_{safe_mode}.npz',
+                ),
+                indices=np.argwhere(prediction_mask)[prediction_finite],
+                target=prediction_target[prediction_finite],
+                prediction=prediction_point[prediction_finite],
+            )
+
             # Uncertainty-aware models additionally return a lower and upper
             # predictive bound. Evaluate and persist only artificially masked
             # positions so the artifacts stay compact.

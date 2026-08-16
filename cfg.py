@@ -45,7 +45,7 @@ class Configs:
                                                                                  'saits', 'transformer', # attenttion time-series (pypots implementation)
                                                                                  'brits', 'mrnn', # rnn time-series (pypots implementation)
                                                                                  'unet', # cnn based method (monai backbone implementation)
-                                                                                 'ae', 'bayesnn', 'bayessnn', # neural methods implemented in this repository
+                                                                                 'ae', 'bayesnn', 'bayessnn', 'anp', # neural methods implemented in this repository
                                                                                  ])
         parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate used in the optimizer")  # (Not used by shallow/classical methods)   
         parser.add_argument("--optimizer", type=str.lower, default='adam', choices=['adam', 'adamw'], 
