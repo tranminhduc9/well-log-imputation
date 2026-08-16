@@ -22,12 +22,19 @@ from monai.networks.nets import UNet as mUNet
 from torch.utils.data import DataLoader
 
 from data import DatasetForImputation
-from .neuralnet import _reconstruction_loss
+
+from .base import AbstractModel
 
 from pypots.imputation.base import BaseNNImputer
 from pypots.utils.logging import logger
 from pypots.utils.metrics import calc_mae
 from pypots.optim import Adam, AdamW
+
+
+def _reconstruction_loss(y_pred, y_true, mask):
+    """Calculate masked mean squared reconstruction error."""
+
+    return torch.nn.functional.mse_loss(y_pred[mask == 1.0], y_true[mask == 1.0])
 
 
 class UNet(BaseNNImputer):
@@ -326,3 +333,25 @@ class UNet(BaseNNImputer):
 
         results_dict = self.predict(X, file_type=file_type)
         return results_dict["imputation"]
+
+
+class UNetModel(AbstractModel):
+    name = "unet"
+
+    def _build_backend(self):
+        cfg = self.config
+        return UNet(
+            n_features=cfg.n_features,
+            spatial_dims=1,
+            channels=tuple(2 ** (index + 5) for index in range(5)),
+            strides=(2, 2, 2, 2),
+            num_res_units=1,
+            batch_size=cfg.batch_size,
+            epochs=cfg.epochs,
+            patience=cfg.patience,
+            optimizer=cfg.optimizer,
+            num_workers=0,
+            device=cfg.device,
+            saving_path=str(cfg.output_dir / self.name),
+            model_saving_strategy="best",
+        )

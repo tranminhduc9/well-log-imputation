@@ -14,6 +14,8 @@ from torch import nn
 from torch.distributions import Normal, kl_divergence
 from torch.utils.data import DataLoader, Dataset
 
+from .base import AbstractModel
+
 
 DatasetDict = dict[str, np.ndarray | torch.Tensor]
 TensorDict = dict[str, torch.Tensor]
@@ -515,3 +517,23 @@ class AttentionNeuralProcess(nn.Module):
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.eval()
         self.is_fitted = True
+
+
+class ANPModel(AbstractModel):
+    name = "anp"
+
+    def _build_backend(self):
+        cfg = self.config
+        return AttentionNeuralProcess(
+            n_steps=cfg.seq_len,
+            n_features=cfg.n_features,
+            hidden_dim=128,
+            latent_dim=32,
+            n_heads=4,
+            batch_size=cfg.batch_size,
+            epochs=cfg.epochs,
+            patience=cfg.patience,
+            learning_rate=cfg.learning_rate,
+            device=cfg.device,
+            saving_path=cfg.output_dir / self.name,
+        )

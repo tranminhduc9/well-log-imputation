@@ -9,6 +9,8 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from .base import AbstractModel
+
 
 class _BayesianRegressor(nn.Module):
     """Heteroscedastic MLP whose dropout remains active during MC inference."""
@@ -212,3 +214,24 @@ class BayesianNNImputer:
             lower[:, :, target][missing] = q_low
             upper[:, :, target][missing] = q_high
         return {"imputation": imputation, "lower": lower, "upper": upper}
+
+
+class BayesianNNModel(AbstractModel):
+    name = "bayesnn"
+
+    def _build_backend(self):
+        cfg = self.config
+        return BayesianNNImputer(
+            num_models=cfg.n_features,
+            # This model flattens sequences into individual depth points, so
+            # the sequence batch size would otherwise be prohibitively small.
+            batch_size=max(cfg.batch_size, 2048),
+            epochs=cfg.epochs,
+            patience=cfg.patience,
+            device=cfg.device,
+            learning_rate=cfg.learning_rate,
+            hidden_size=64,
+            dropout=0.15,
+            mc_samples=30,
+            min_delta=1e-4,
+        )

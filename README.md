@@ -102,13 +102,18 @@ python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds
 - 'qrf' (alias: 'quantilerf'): Quantile Random Forest (tree-distribution 5th/50th/95th percentiles)
 - 'bayesnn' (alias: 'bayessnn'): Bayesian neural network approximation using heteroscedastic Gaussian output and MC Dropout
 - 'xgboost': XGBoost Regressor [[source]](https://xgboost.readthedocs.io/en/stable/python/python_api.html#xgboost.XGBRegressor)
-- 'svm': Support Vector Regressor [[source]](https://scikit-learn.org/stable/modules/generated/sklearn.svm.SVR.html#sklearn.svm.SVR)
 - 'saits': SAITS (Self-Attention Imputation Time Series) [[source]](https://github.com/WenjieDu/PyPOTS/tree/main/pypots/imputation/saits) [[paper]](https://arxiv.org/pdf/2202.08516)
-- 'transformer': Transformer based Imputation for Time Series [[source]](https://github.com/WenjieDu/PyPOTS/tree/main/pypots/imputation/transformer) [[paper]](https://proceedings.neurips.cc/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf)
-- 'brits': BRITS (Bidirectional Recurrent Imputation for Time Series) [[source]](https://github.com/WenjieDu/PyPOTS/tree/main/pypots/imputation/brits) [[paper]](https://papers.nips.cc/paper_files/paper/2018/file/734e6bfcd358e25ac1db0a4241b95651-Paper.pdf)
-- 'mrnn': mRNN [[source]](https://github.com/WenjieDu/PyPOTS/tree/main/pypots/imputation/mrnn) [[paper]](https://ieeexplore.ieee.org/ielaam/10/8694044/8485748-aam.pdf?tag=1)
 - 'unet': UNet based imputation method [[paper]](https://arxiv.org/pdf/1505.04597.pdf)
-- 'ae': Autoencoder (NN) based imputation method
+- 'anp': Depth-aware Attentive Neural Process with predictive intervals
+
+### Model architecture
+
+Every selectable model lives in its own file under `models/` and implements the
+common `AbstractModel` contract from `models/base.py`. `ModelFactory` in
+`models/factory.py` lazily imports the selected adapter, so optional neural
+dependencies are not imported when a classical model is selected. `main.py`
+creates the configured factory once and asks it for a fresh model for every
+cross-validation fold.
 
 ## Datasets
 
@@ -125,11 +130,12 @@ The three public datasets can be downloaded already processed as it was used in 
 
 ## Adding a novel imputation method
 
-To include a new imputation method in this base three steps have to be performed.
+To include a new imputation method, keep its implementation, adapter, and
+hyperparameters together in one new module.
 
 #### First
-Create an implementation file `mymodel.py` in the models directory, that will include everything you need to define your imputation method.
-In addition to your method definitions, it is essential that the class of your method implement two functions:
+Create `models/mymodel.py` with the implementation of the imputer. Its backend
+must provide two functions:
 1. `fit(...)` function: it receives a train_set (a dictionary of strings to numpy arrays) with:
  - the training sequences with artificial missing values added
  - the original training sequences
@@ -139,15 +145,29 @@ In addition to your method definitions, it is essential that the class of your m
  
 2. `predict(...)` function: it receives a test_set (similar to the train_set above) and returns a dictionary with the test_set with imputed values
 
-See `models/shallow.py` or `models/autoencoder.py` for examples of implementations of these two functions.
+Then add an adapter that implements the abstract model and constructs that
+backend with all model-specific hyperparameters in the same file:
+
+```python
+from .base import AbstractModel
+
+
+class MyModel(AbstractModel):
+    name = "mymodel"
+
+    def _build_backend(self):
+        return MyImputer(n_features=self.config.n_features)
+```
+
+See `models/random_forest.py` or `models/attention_neural_process.py` for complete examples.
 
 #### Second
-You have to implement and include an `instantiate_MYMODEL()` function in the `models/__init__.py` in addition to importing your model implementation file in that same file. In `models/__init__.py` you can find the exact parameters passed to your function with examples of implementation for the available methods. It is in this `instantiate_MYMODEL()` function that the hyperparameters of your method have to be set.
+Register the module and adapter in `_MODEL_REGISTRY` inside
+`models/factory.py`. Set `uses_optimizer=True` there only when the model needs
+the configured PyPOTS optimizer. `cfg.py` reads its CLI choices directly from
+this registry, so no second model list needs to be maintained.
 
-#### Lastly
-In the `cfg.py`, you have to add your model as an option in argument `--model`
-
-With these three steps, your method is ready to be tested using this code implementation and you should be able to execute in the terminal:
+With these two steps, your method is ready to be tested using this code implementation and you should be able to execute in the terminal:
 ```bash
 # Evaluates mymodel on the default experiments of the benchmark in the Geolink dataset
 python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds 5 --logs GR DTC RHOB NPHI --model mymodel

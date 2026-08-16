@@ -1,10 +1,7 @@
 '''
 Main script: It runs the proposed experiments for the benchmark
 '''
-from typing import Callable, Iterator, Union, Optional
-
 import numpy as np
-import matplotlib.pyplot as plt
 import os
 import time
 import logging
@@ -16,10 +13,9 @@ from pypots.utils.metrics import calc_mae, calc_mse, calc_rmse
 from pypots.utils.random import set_random_seed
 logging.disable(logging.NOTSET)
 
-from utils.metrics import cal_r2, cal_cc
-
-import models
+from models import ModelFactory
 from data import mask_X
+from utils.metrics import cal_r2, cal_cc
 
 def select_optimizer(optimizer: str, lr: float):    
     '''
@@ -104,12 +100,18 @@ def get_dataset_dict(data: np.ndarray, mode: str,
     
     return data_dict
     
-def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]], n_folds: int, 
-                    dataset_name: str, data_dir: str, model_name: str = 'model') -> dict[str, dict[str, list[float]] ]:
+def run_experiments(
+    model_factory: ModelFactory,
+    experiments: list[dict[str, object]],
+    n_folds: int,
+    dataset_name: str,
+    data_dir: str,
+    model_name: str = 'model',
+) -> dict[str, dict[str, list[float]]]:
     '''
     Runs all experiments for a single model
     
-    @param model_fn: a factory object that is used to instantiate a new instance of the model to be experimented
+    @param model_factory: factory used to create a fresh model for every fold
     @param experiments: a dictionary with the experiments to be performed. It includes the missing data patterns (single, block, profile) 
                          and the configuration for these patterns (n_points, block_length, etc)
     @param n_folds: the number folds to be tesed and that the data is partioned (usually five fold)
@@ -143,7 +145,7 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
     # 
     for fold in range(n_folds):
         ## instantiate a new model
-        model = model_fn.instantiate()
+        model = model_factory.create()
         
         ## To track training time
         init_time_fold = time.time()
@@ -173,7 +175,7 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
 
         ## Train the model on the training set, and validate it on the validating set to select the best model for testing in the next step
 
-        if model_name.lower() not in {'locf', 'mean'}: ## LOCF and MEAN don't need to be trained
+        if model.requires_training:
             print('training model in training set and tracking performance in validation set..')
             logging.info('training model in training set and tracking performance in validation set..')
             model.fit(train_set=dataset_for_training, val_set=dataset_for_validating['rand'])
@@ -218,7 +220,7 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
                 raise ValueError(
                     f'No finite point predictions for fold {fold}, mode {mode}.'
                 )
-            prediction_dir = os.path.join(model_fn.output_dir, 'predictions')
+            prediction_dir = os.path.join(model_factory.output_dir, 'predictions')
             os.makedirs(prediction_dir, exist_ok=True)
             safe_mode = mode.replace('.', '_')
             np.savez_compressed(
@@ -258,7 +260,7 @@ def run_experiments(model_fn: models.Factory, experiments: dict[str, list[int]],
                 metrics[model_name].setdefault(picp_key, []).append(val_picp)
                 metrics[model_name].setdefault(mpiw_key, []).append(val_mpiw)
 
-                uncertainty_dir = os.path.join(model_fn.output_dir, 'uncertainty')
+                uncertainty_dir = os.path.join(model_factory.output_dir, 'uncertainty')
                 os.makedirs(uncertainty_dir, exist_ok=True)
                 safe_mode = mode.replace('.', '_')
                 np.savez_compressed(
@@ -331,24 +333,36 @@ def main(cfg):
     
     # Model setup
     ## define optimizer
-    neural_models = {'saits', 'transformer', 'brits', 'mrnn', 'unet', 'ae'}
-    optim = select_optimizer(cfg.optimizer, cfg.lr) if cfg.model in neural_models else None
+    optim = (
+        select_optimizer(cfg.optimizer, cfg.lr)
+        if ModelFactory.uses_optimizer(cfg.model)
+        else None
+    )
     
     ## define instantiate model function
-    model = models.Factory(cfg.model,
-                           seq_len = cfg.slice_len, 
-                           n_features = cfg.n_features, 
-                           batch_size = cfg.batch_size, 
-                           epochs = cfg.epochs, 
-                           patience = cfg.patience, 
-                           optimizer = optim, 
-                           learning_rate = cfg.lr,
-                           device = cfg.device, 
-                           output_dir = cfg.output_dir)
+    model_factory = ModelFactory(
+        cfg.model,
+        seq_len=cfg.slice_len,
+        n_features=cfg.n_features,
+        batch_size=cfg.batch_size,
+        epochs=cfg.epochs,
+        patience=cfg.patience,
+        optimizer=optim,
+        learning_rate=cfg.lr,
+        device=cfg.device,
+        output_dir=cfg.output_dir,
+    )
     
 
     # Run experiments
-    metrics = run_experiments(model, cfg.experiments, cfg.n_folds, cfg.dataset_name, cfg.dataset_dir, model_name=cfg.model)
+    metrics = run_experiments(
+        model_factory,
+        cfg.experiments,
+        cfg.n_folds,
+        cfg.dataset_name,
+        cfg.dataset_dir,
+        model_name=cfg.model,
+    )
     
     # Log all validation metrics of the model
     print_table(cfg.model, metrics)

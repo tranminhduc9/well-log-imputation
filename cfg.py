@@ -7,6 +7,8 @@ from pathlib import Path
 from argparse import ArgumentParser
 import torch
 
+from models import MODEL_NAMES
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATASET_DIR = PROJECT_ROOT / "data" / "imputation-processed-datasets"
 
@@ -40,13 +42,12 @@ class Configs:
         parser.add_argument("--profiles", type=str.upper, nargs='+', default=['RAND'])
         
         # model setup 
-        parser.add_argument("--model", type=str.lower, default="saits", choices=['locf', 'mean', # classical (mean not implemented)
-                                                                                 'rf', 'qrf', 'quantilerf', 'xgboost', 'svm', # shallow/ensemble methods
-                                                                                 'saits', 'transformer', # attenttion time-series (pypots implementation)
-                                                                                 'brits', 'mrnn', # rnn time-series (pypots implementation)
-                                                                                 'unet', # cnn based method (monai backbone implementation)
-                                                                                 'ae', 'bayesnn', 'bayessnn', 'anp', # neural methods implemented in this repository
-                                                                                 ])
+        parser.add_argument(
+            "--model",
+            type=str.lower,
+            default="saits",
+            choices=MODEL_NAMES,
+        )
         parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate used in the optimizer")  # (Not used by shallow/classical methods)   
         parser.add_argument("--optimizer", type=str.lower, default='adam', choices=['adam', 'adamw'], 
                             help="Name of the optimizer used in training") # (Not used by shallow/classical methods) 

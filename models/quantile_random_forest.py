@@ -3,6 +3,8 @@
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 
+from .base import AbstractModel
+
 
 class QuantileRandomForest:
     """Impute with tree-prediction medians and empirical quantile bounds."""
@@ -71,3 +73,21 @@ class QuantileRandomForest:
             upper[:, :, target][missing] = q_high
 
         return {"imputation": imputation, "lower": lower, "upper": upper}
+
+
+class QuantileRandomForestModel(AbstractModel):
+    name = "qrf"
+
+    def _build_backend(self):
+        return QuantileRandomForest(
+            self.config.n_features,
+            # QRF trains one forest per feature. These bounded defaults keep
+            # the full depth-sample benchmark practical on CPU.
+            n_estimators=100,
+            max_depth=20,
+            min_samples_leaf=5,
+            min_samples_split=10,
+            max_samples=0.5,
+            n_jobs=-1,
+            random_state=17076,
+        )
