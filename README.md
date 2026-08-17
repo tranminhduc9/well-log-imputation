@@ -101,7 +101,7 @@ python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds
 - 'locf': Last Observation Carry Forward
 - 'rf': Random Forest [[source]](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestRegressor.html#sklearn.ensemble.RandomForestRegressor)
 - 'qrf' (alias: 'quantilerf'): Quantile Random Forest (tree-distribution 5th/50th/95th percentiles)
-- 'bayesnn' (alias: 'bayessnn'): Bayesian neural network approximation using heteroscedastic Gaussian output and MC Dropout
+- 'bayesnn' (alias: 'bayessnn'): variational Bayesian neural network (Bayes by Backprop) with a learned Gaussian posterior over weights and biases
 - 'xgboost': XGBoost Regressor [[source]](https://xgboost.readthedocs.io/en/stable/python/python_api.html#xgboost.XGBRegressor)
 - 'saits': SAITS (Self-Attention Imputation Time Series) [[source]](https://github.com/WenjieDu/PyPOTS/tree/main/pypots/imputation/saits) [[paper]](https://arxiv.org/pdf/2202.08516)
 - 'unet': UNet based imputation method [[paper]](https://arxiv.org/pdf/1505.04597.pdf)

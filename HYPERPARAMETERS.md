@@ -177,31 +177,33 @@ Tổng loss của U-Net là `L_rec + 5 × L_imp`. Nếu CLI chọn
 
 ### 3.7 Bayesian Neural Network (`bayesnn`, `bayessnn`)
 
-Project huấn luyện một MLP Bayesian approximation cho mỗi feature. Mỗi model
-dùng các feature còn lại làm input.
+Project huấn luyện một variational BNN cho mỗi feature, theo Feng et al. (2021).
+Mỗi model dùng các feature còn lại làm input; mọi weight và bias đều có posterior
+Gaussian học được bằng reparameterization, thay vì MC Dropout.
 
 | Nhóm | Tham số | Giá trị mặc định hiệu lực |
 |---|---|---:|
 | Số model | `num_models` | `n_features = 4` |
 | Kiến trúc | Hidden layers | `2` |
-| Kiến trúc | `hidden_size` mỗi layer | `48` |
+| Kiến trúc | `hidden_size` mỗi layer | `10` |
 | Kiến trúc | Activation | `ReLU` |
-| Kiến trúc | Output size | `2` (`mean`, `log_variance`) |
-| Regularization | `dropout` | `0.15` |
+| Kiến trúc | Output size | `1` |
+| Variational posterior | Family | Factorized Gaussian `N(mu, softplus(rho)^2)` |
+| Khởi tạo posterior | `rho` | `0` |
+| Prior Type I | `pi`, `sigma1`, `sigma2` | `0.5`, `1.5`, `0.1` |
+| Loss | Variational free energy | `KL(q || p) / n_train + Gaussian NLL` |
 | Training | `batch_size` | `max(CLI batch size, 4096) = 4096` |
 | Validation | Validation batch size | `max(model batch size, 1024) = 4096` |
-| Training | `epochs` | `min(CLI epochs, 150) = 150` |
+| Training | `epochs` | `CLI epochs = 500` |
 | Training | `patience` | `CLI patience = 50` |
 | Training | `learning_rate` | `--lr = 1e-3` |
 | Training | Optimizer | PyTorch `Adam` |
 | Early stopping | `min_delta` | `1e-4` |
-| Inference | `mc_samples` | `20` |
+| Inference | `mc_samples` | `1000` |
 | Inference | `prediction_batch_size` | `8192` |
-| Interval | `lower_quantile` | `0.05` |
-| Interval | Point quantile | `0.50` |
-| Interval | `upper_quantile` | `0.95` |
-| Interval | Coverage | `90%` |
-| Numerical bound | `log_variance` clamp | `[-10, 6]` |
+| Prediction | Point estimate | Ensemble mean |
+| Uncertainty | `std` | Empirical ensemble standard deviation |
+| Interval | `lower`, `upper` | Ensemble mean `+- 1 std` |
 
 BayesNN dùng `--lr` trực tiếp nhưng không dùng lựa chọn `--optimizer`; optimizer
 luôn là PyTorch `Adam`.
