@@ -20,7 +20,7 @@ class ModelConfig:
     n_features: int = 4
     batch_size: int = 32
     epochs: int = 50
-    patience: int = 75
+    patience: int = 50
     optimizer: Any = None
     learning_rate: float = 1e-3
     device: str = "cpu"

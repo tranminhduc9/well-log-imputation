@@ -36,7 +36,7 @@ class BayesianNNImputer:
         num_models: int,
         batch_size: int = 32,
         epochs: int = 300,
-        patience: int = 75,
+        patience: int = 50,
         device: Optional[Union[str, torch.device]] = None,
         learning_rate: float = 1e-3,
         hidden_size: int = 64,
@@ -225,13 +225,13 @@ class BayesianNNModel(AbstractModel):
             num_models=cfg.n_features,
             # This model flattens sequences into individual depth points, so
             # the sequence batch size would otherwise be prohibitively small.
-            batch_size=max(cfg.batch_size, 2048),
-            epochs=cfg.epochs,
+            batch_size=max(cfg.batch_size, 4096),
+            epochs=min(cfg.epochs, 150),
             patience=cfg.patience,
             device=cfg.device,
             learning_rate=cfg.learning_rate,
-            hidden_size=64,
+            hidden_size=48,
             dropout=0.15,
-            mc_samples=30,
+            mc_samples=20,
             min_delta=1e-4,
         )

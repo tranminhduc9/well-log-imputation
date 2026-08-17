@@ -140,14 +140,17 @@ class AttentionNeuralProcess(nn.Module):
         n_heads: int = 4,
         batch_size: int = 32,
         epochs: int = 100,
-        patience: Optional[int] = 75,
-        learning_rate: float = 1e-3,
+        patience: Optional[int] = 50,
+        learning_rate: float = 3e-4,
         weight_decay: float = 1e-5,
         dropout: float = 0.1,
         initial_depth_scale: float = 0.2,
-        kl_weight: float = 1e-3,
+        kl_weight: float = 3e-3,
+        kl_warmup_epochs: int = 40,
         observed_loss_weight: float = 0.1,
-        min_scale: float = 1e-3,
+        min_scale: float = 3e-2,
+        max_scale: float = 3.0,
+        prediction_samples: int = 16,
         device: str | torch.device = "cpu",
         saving_path: str | Path = ".",
     ) -> None:
@@ -156,6 +159,10 @@ class AttentionNeuralProcess(nn.Module):
             raise ValueError("n_steps must be at least 2")
         if n_features < 1:
             raise ValueError("n_features must be positive")
+        if not 0 < min_scale < max_scale:
+            raise ValueError("scale bounds must satisfy 0 < min_scale < max_scale")
+        if prediction_samples < 1:
+            raise ValueError("prediction_samples must be positive")
 
         requested_device = torch.device(device)
         if requested_device.type == "cuda" and not torch.cuda.is_available():
@@ -171,8 +178,12 @@ class AttentionNeuralProcess(nn.Module):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.kl_weight = kl_weight
+        self.kl_warmup_epochs = max(1, kl_warmup_epochs)
+        self._active_kl_weight = 0.0
         self.observed_loss_weight = observed_loss_weight
         self.min_scale = min_scale
+        self.max_scale = max_scale
+        self.prediction_samples = prediction_samples
         self.device = requested_device
         self.saving_path = Path(saving_path)
 
@@ -334,8 +345,9 @@ class AttentionNeuralProcess(nn.Module):
                 (target["target_depth"], representation["deterministic"], latent), dim=-1
             )
         )
-        mean, raw_scale = decoded.chunk(2, dim=-1)
-        scale = self.min_scale + F.softplus(raw_scale)
+        mean, raw_log_scale = decoded.chunk(2, dim=-1)
+        log_scale = raw_log_scale.clamp(math.log(self.min_scale), math.log(self.max_scale))
+        scale = torch.exp(log_scale)
         return {"mean": mean, "scale": scale}
 
     def forward(self, batch: TensorDict) -> TensorDict:
@@ -376,32 +388,54 @@ class AttentionNeuralProcess(nn.Module):
         )
         return outputs
 
-    def _compute_loss(self, outputs: TensorDict, target: TensorDict) -> torch.Tensor:
+    @staticmethod
+    def _masked_mean_per_sample(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        values = (values * mask).flatten(start_dim=1).sum(dim=1)
+        counts = mask.flatten(start_dim=1).sum(dim=1)
+        valid_samples = counts > 0
+        if not valid_samples.any():
+            return values.new_zeros(())
+        return (values[valid_samples] / counts[valid_samples]).mean()
+
+    def _loss_components(self, outputs: TensorDict, target: TensorDict) -> TensorDict:
         distribution = Normal(outputs["mean"], outputs["scale"])
         nll = -distribution.log_prob(target["target"])
         missing_mask = target["indicating_mask"] * target["target_valid"]
         observed_mask = target["observed_mask"] * target["target_valid"]
 
-        if missing_mask.sum() > 0:
-            missing_loss = (nll * missing_mask).sum() / missing_mask.sum()
-        else:
-            missing_loss = nll.new_zeros(())
-        observed_loss = (nll * observed_mask).sum() / observed_mask.sum().clamp_min(1.0)
+        missing_loss = self._masked_mean_per_sample(nll, missing_mask)
+        observed_loss = self._masked_mean_per_sample(nll, observed_mask)
         reconstruction = missing_loss + self.observed_loss_weight * observed_loss
 
         posterior = outputs.get("posterior")
-        if posterior is None:
-            return reconstruction
-        latent_kl = kl_divergence(posterior, outputs["prior"]).sum(dim=-1).mean()
-        return reconstruction + self.kl_weight * latent_kl
+        latent_kl = (
+            nll.new_zeros(())
+            if posterior is None
+            else kl_divergence(posterior, outputs["prior"]).sum(dim=-1).mean()
+        )
+        loss = reconstruction + self._active_kl_weight * latent_kl
+        mae = self._masked_mean_per_sample(
+            torch.abs(outputs["mean"] - target["target"]), missing_mask
+        )
+        mean_scale = self._masked_mean_per_sample(outputs["scale"], missing_mask)
+        return {
+            "loss": loss,
+            "mae": mae,
+            "missing_nll": missing_loss,
+            "kl": latent_kl,
+            "mean_scale": mean_scale,
+        }
+
+    def _compute_loss(self, outputs: TensorDict, target: TensorDict) -> torch.Tensor:
+        return self._loss_components(outputs, target)["loss"]
 
     # ------------------------------------------------------------------
     # Training and inference
     # ------------------------------------------------------------------
-    def _run_epoch(self, loader: DataLoader, *, training: bool) -> float:
+    def _run_epoch(self, loader: DataLoader, *, training: bool) -> dict[str, float]:
         self.train(training)
-        total_loss = 0.0
-        total_batches = 0
+        totals = {name: 0.0 for name in ("loss", "mae", "missing_nll", "kl", "mean_scale")}
+        total_samples = 0
         for cpu_batch in loader:
             batch = self._move_batch(cpu_batch)
             if training:
@@ -410,7 +444,8 @@ class AttentionNeuralProcess(nn.Module):
 
             with torch.set_grad_enabled(training):
                 outputs = self.forward(batch)
-                loss = self._compute_loss(outputs, batch)
+                components = self._loss_components(outputs, batch)
+                loss = components["loss"]
                 if training:
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)
@@ -418,16 +453,18 @@ class AttentionNeuralProcess(nn.Module):
 
             if not torch.isfinite(loss):
                 raise ValueError("ANP produced a non-finite loss")
-            total_loss += float(loss.detach())
-            total_batches += 1
-        if total_batches == 0:
+            batch_size = batch["X"].shape[0]
+            for name, value in components.items():
+                totals[name] += float(value.detach()) * batch_size
+            total_samples += batch_size
+        if total_samples == 0:
             raise ValueError("ANP received an empty dataset")
-        return total_loss / total_batches
+        return {name: value / total_samples for name, value in totals.items()}
 
-    def _train_epoch(self, loader: DataLoader) -> float:
+    def _train_epoch(self, loader: DataLoader) -> dict[str, float]:
         return self._run_epoch(loader, training=True)
 
-    def _validate_epoch(self, loader: DataLoader) -> float:
+    def _validate_epoch(self, loader: DataLoader) -> dict[str, float]:
         return self._run_epoch(loader, training=False)
 
     def fit(self, train_set: DatasetDict, val_set: Optional[DatasetDict] = None) -> None:
@@ -436,15 +473,29 @@ class AttentionNeuralProcess(nn.Module):
         self.optimizer = torch.optim.AdamW(
             self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode="min",
+            factor=0.5,
+            patience=max(5, min(20, (self.patience or 20) // 4)),
+            min_lr=1e-5,
+        )
         self.best_loss = float("inf")
         self.best_model_dict = None
         patience_left = self.patience
 
         for epoch in range(self.epochs):
-            train_loss = self._train_epoch(train_loader)
-            validation_loss = self._validate_epoch(val_loader) if val_loader is not None else train_loss
-            if validation_loss < self.best_loss:
-                self.best_loss = validation_loss
+            self._active_kl_weight = self.kl_weight * min(
+                1.0, (epoch + 1) / self.kl_warmup_epochs
+            )
+            train_metrics = self._train_epoch(train_loader)
+            validation_metrics = (
+                self._validate_epoch(val_loader) if val_loader is not None else train_metrics
+            )
+            selection_metric = validation_metrics["mae"]
+            scheduler.step(selection_metric)
+            if selection_metric < self.best_loss:
+                self.best_loss = selection_metric
                 self.best_model_dict = deepcopy(self.state_dict())
                 patience_left = self.patience
             elif patience_left is not None:
@@ -453,7 +504,11 @@ class AttentionNeuralProcess(nn.Module):
             if epoch == 0 or (epoch + 1) % 10 == 0:
                 print(
                     f"ANP epoch {epoch + 1}/{self.epochs} - "
-                    f"train: {train_loss:.6f} - val: {validation_loss:.6f}",
+                    f"train loss: {train_metrics['loss']:.6f} - "
+                    f"val MAE: {validation_metrics['mae']:.6f} - "
+                    f"val NLL: {validation_metrics['missing_nll']:.6f} - "
+                    f"scale: {validation_metrics['mean_scale']:.4f} - "
+                    f"KL weight: {self._active_kl_weight:.5f}",
                     flush=True,
                 )
             if patience_left == 0:
@@ -465,8 +520,35 @@ class AttentionNeuralProcess(nn.Module):
         self.eval()
         self.is_fitted = True
 
+    def _prior_predictive(self, batch: TensorDict) -> TensorDict:
+        split = self._split_context_target(batch)
+        context = {
+            "context_depth": split["context_depth"],
+            "context_values": split["context_values"],
+            "context_mask": split["context_mask"],
+        }
+        target = {
+            "target_depth": split["target_depth"],
+            "target_values": split["target_values"],
+            "target_mask": split["target_mask"],
+            "target_valid": split["target_valid"],
+        }
+        representation = self._encode_context(context)
+        representation = self._apply_attention(context, target, representation)
+        means, second_moments = [], []
+        for _ in range(self.prediction_samples):
+            representation["latent"] = representation["prior"].rsample()
+            decoded = self._decode_target(target, representation)
+            means.append(decoded["mean"])
+            second_moments.append(decoded["scale"].square() + decoded["mean"].square())
+        mean = torch.stack(means).mean(dim=0)
+        variance = (torch.stack(second_moments).mean(dim=0) - mean.square()).clamp_min(
+            self.min_scale**2
+        )
+        return {"mean": mean, "scale": variance.sqrt()}
+
     def _impute_batch(self, batch: TensorDict) -> TensorDict:
-        outputs = self.forward(batch)
+        outputs = self._prior_predictive(batch)
         mask = batch["indicating_mask"].bool()
         imputation = torch.where(mask, outputs["mean"], batch["X"])
         lower_prediction = outputs["mean"] - 1.6448536269514722 * outputs["scale"]
@@ -533,7 +615,12 @@ class ANPModel(AbstractModel):
             batch_size=cfg.batch_size,
             epochs=cfg.epochs,
             patience=cfg.patience,
-            learning_rate=cfg.learning_rate,
+            learning_rate=min(cfg.learning_rate, 3e-4),
+            kl_weight=3e-3,
+            kl_warmup_epochs=40,
+            min_scale=3e-2,
+            max_scale=3.0,
+            prediction_samples=16,
             device=cfg.device,
             saving_path=cfg.output_dir / self.name,
         )

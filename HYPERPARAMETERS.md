@@ -42,9 +42,9 @@ dùng mặc định của phiên bản thư viện được cài đặt.
 |---|---:|---|
 | `--slice_len` | `256` | SAITS, U-Net, ANP; được truyền thành `seq_len`/`n_steps` |
 | `--epochs` | `500` | SAITS, U-Net, BayesNN, ANP |
-| `--patience` | `75` | Early stopping của SAITS, U-Net, BayesNN, ANP |
+| `--patience` | `50` | Early stopping của SAITS, U-Net, BayesNN, ANP |
 | `--batch_size` | `32` | SAITS, U-Net, ANP; BayesNN áp dụng quy tắc riêng bên dưới |
-| `--lr` | `1e-3` | SAITS/U-Net thông qua optimizer; BayesNN/ANP dùng trực tiếp |
+| `--lr` | `1e-3` | SAITS/U-Net qua optimizer; BayesNN dùng trực tiếp; ANP giới hạn tối đa `3e-4` |
 | `--optimizer` | `adam` | `adam` hoặc `adamw`; chỉ SAITS và U-Net lấy optimizer từ CLI |
 
 ### 2.3 Missing-pattern experiments
@@ -144,7 +144,7 @@ dùng `--lr` của CLI.
 | Loss | `MIT_weight` | `1` |
 | Training | `batch_size` | `32` |
 | Training | `epochs` | `500` |
-| Training | `patience` | `75` |
+| Training | `patience` | `50` |
 | Training | `optimizer` | `Adam(lr=1e-3)` |
 | Runtime | `num_workers` | `0` |
 | Checkpoint | `model_saving_strategy` | `best` |
@@ -164,7 +164,7 @@ Nếu CLI chọn `--optimizer adamw`, optimizer hiệu lực trở thành
 | Kiến trúc | `num_res_units` | `1` |
 | Training | `batch_size` | `32` |
 | Training | `epochs` | `500` |
-| Training | `patience` | `75` |
+| Training | `patience` | `50` |
 | Training | `optimizer` | `Adam(lr=1e-3)` |
 | Runtime | `num_workers` | `0` |
 | Checkpoint | `model_saving_strategy` | `best` |
@@ -184,18 +184,18 @@ dùng các feature còn lại làm input.
 |---|---|---:|
 | Số model | `num_models` | `n_features = 4` |
 | Kiến trúc | Hidden layers | `2` |
-| Kiến trúc | `hidden_size` mỗi layer | `64` |
+| Kiến trúc | `hidden_size` mỗi layer | `48` |
 | Kiến trúc | Activation | `ReLU` |
 | Kiến trúc | Output size | `2` (`mean`, `log_variance`) |
 | Regularization | `dropout` | `0.15` |
-| Training | `batch_size` | `max(CLI batch_size, 2048) = 2048` |
-| Validation | Validation batch size | `max(model batch_size, 1024) = 2048` |
-| Training | `epochs` | `500` |
-| Training | `patience` | `75` |
-| Training | `learning_rate` | `1e-3` |
+| Training | `batch_size` | `max(CLI batch size, 4096) = 4096` |
+| Validation | Validation batch size | `max(model batch size, 1024) = 4096` |
+| Training | `epochs` | `min(CLI epochs, 150) = 150` |
+| Training | `patience` | `CLI patience = 50` |
+| Training | `learning_rate` | `--lr = 1e-3` |
 | Training | Optimizer | PyTorch `Adam` |
 | Early stopping | `min_delta` | `1e-4` |
-| Inference | `mc_samples` | `30` |
+| Inference | `mc_samples` | `20` |
 | Inference | `prediction_batch_size` | `8192` |
 | Interval | `lower_quantile` | `0.05` |
 | Interval | Point quantile | `0.50` |
@@ -219,21 +219,24 @@ luôn là PyTorch `Adam`.
 | Regularization | `dropout` | `0.1` |
 | Training | `batch_size` | `32` |
 | Training | `epochs` | `500` |
-| Training | `patience` | `75` |
-| Training | `learning_rate` | `1e-3` |
+| Training | `patience` | `50` |
+| Training | `learning_rate` | `min(--lr, 3e-4) = 3e-4` |
 | Training | Optimizer | PyTorch `AdamW` |
 | Training | `weight_decay` | `1e-5` |
-| Loss | `kl_weight` | `1e-3` |
+| Loss | `kl_weight` | `3e-3`, warm-up trong 40 epoch |
 | Loss | `observed_loss_weight` | `0.1` |
-| Numerical bound | `min_scale` | `1e-3` |
+| Numerical bound | `scale` | Clamp trong `[0.03, 3.0]` |
+| Training mask | Missing pattern | Dùng dataset `rand` chung do `main.py` tạo |
+| Checkpoint | Selection metric | MAE trên các vị trí bị mask |
 | Runtime | `num_workers` | `0` |
+| Inference | Latent samples | `16` mẫu từ prior |
 | Prediction interval | z-score | `1.6448536269514722` |
 | Prediction interval | Coverage | `90%` |
 
 Các MLP encoder, depth encoder, latent encoder và decoder đều có hai hidden
-layer kích thước `hidden_dim`, activation `ReLU`, và dropout `0.1`. ANP dùng
-`--lr` trực tiếp nhưng optimizer luôn là PyTorch `AdamW`, không phụ thuộc lựa
-chọn `--optimizer`.
+layer kích thước `hidden_dim`, activation `ReLU`, và dropout `0.1`. ANP giới hạn
+learning rate ở `3e-4` để ổn định Gaussian variance head; optimizer luôn là
+PyTorch `AdamW`, không phụ thuộc lựa chọn `--optimizer`.
 
 ## 4. Mặc định khi gọi `ModelFactory` trực tiếp
 
@@ -246,12 +249,12 @@ Khi chạy qua CLI, các giá trị ở mục 2 được truyền vào factory. 
 | `n_features` | `4` |
 | `batch_size` | `32` |
 | `epochs` | `50` |
-| `patience` | `75` |
+| `patience` | `50` |
 | `optimizer` | `None` |
 | `learning_rate` | `1e-3` |
 | `device` | `cpu` |
 | `output_dir` | `.` |
 
 Do đó, để tái lập đúng cấu hình notebook/CLI, nên chạy qua `main.py` hoặc truyền
-đầy đủ `epochs=500`, `patience=75` và optimizer tương ứng khi dùng factory trực
+đầy đủ `epochs=500`, `patience=50` và optimizer tương ứng khi dùng factory trực
 tiếp.
