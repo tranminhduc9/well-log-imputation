@@ -155,8 +155,13 @@ def run_experiments(
         ## Loading data
         data_train, data_val = loading_data(dataset_name, data_dir, fold)
 
-        # Create a rand masking for training        
-        dataset_for_training = get_dataset_dict(data_train, 'rand')
+        # PyPOTS models such as SAITS derive their missing mask from NaNs in X.
+        # Other adapters keep the benchmark's zero-filled representation.
+        dataset_for_training = get_dataset_dict(
+            data_train,
+            'rand',
+            fill=model.requires_nan_training_input,
+        )
         
         # Create a rand validation set for measuring in training only        
         dataset_for_validating['rand'] = get_dataset_dict(data_val, 'rand', fill=True, do_copy=True)

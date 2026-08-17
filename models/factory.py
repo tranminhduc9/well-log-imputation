@@ -43,7 +43,7 @@ class ModelFactory:
         n_features: int = 4,
         batch_size: int = 32,
         epochs: int = 50,
-        patience: int = 15,
+        patience: int = 75,
         optimizer: Any = None,
         device: str = "cpu",
         output_dir: Path | str = ".",

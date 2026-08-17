@@ -20,7 +20,7 @@ class ModelConfig:
     n_features: int = 4
     batch_size: int = 32
     epochs: int = 50
-    patience: int = 15
+    patience: int = 75
     optimizer: Any = None
     learning_rate: float = 1e-3
     device: str = "cpu"
@@ -51,6 +51,7 @@ class AbstractModel(ABC):
 
     name: ClassVar[str]
     requires_training: ClassVar[bool] = True
+    requires_nan_training_input: ClassVar[bool] = False
 
     def __init__(self, config: ModelConfig) -> None:
         self.config = config

@@ -5,6 +5,11 @@ from .base import AbstractModel
 
 class SAITSModel(AbstractModel):
     name = "saits"
+    # PyPOTS derives its training missing mask from NaNs in X. If the benchmark
+    # zero-fills its synthetic gaps first, PyPOTS treats those zeros as observed
+    # values and silently replaces the intended gap patterns with its own MCAR
+    # point mask.
+    requires_nan_training_input = True
 
     def _build_backend(self):
         from pypots.imputation import SAITS

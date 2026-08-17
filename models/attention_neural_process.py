@@ -140,7 +140,7 @@ class AttentionNeuralProcess(nn.Module):
         n_heads: int = 4,
         batch_size: int = 32,
         epochs: int = 100,
-        patience: Optional[int] = 10,
+        patience: Optional[int] = 75,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-5,
         dropout: float = 0.1,

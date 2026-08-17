@@ -25,6 +25,7 @@ CUDA is unavailable. Use `--device cpu` to force CPU.
 
 - The `main.py` file is the principal script and is used to evaluate a method in a given dataset
 - The `cfg.py` file contains all the arguments that the `main.py` script accepts. A complete list of arguments is found [here](#key-parameters).
+- `HYPERPARAMETERS.md` consolidates the effective global and per-model hyperparameters used by the benchmark.
 - `analise.ipynb` a jupyter notebook containing some visualization of the results, `format_metric.ipynb` a notebook to collect and format the results from training logs into a `.csv` file
 - `data` directory contains modules related to data handling and manipulation: 
   * `data/datasets.py` contains classes for preparing data for some of the imputation methods
@@ -86,7 +87,7 @@ python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds
 | `--logs`            |  ['GR', 'DTC', 'RHOB', 'NPHI'] | List of the logs present in the processed dataset <br /> (the order in the list is assumed as the same order of logs in  the stored processed slices)                                              |
 | `--slice_len`       |                            256 | Length of the sliced sequences of the processed dataset                                                                                                                                     |
 | `--epochs`          |                            500 | Maximum number of training epochs for deep methods                                                                                                                                          |
-| `--patience`        |                             10 | Early-stopping patience. If validation loss does not improve for this number of consecutive epochs, training is aborted                                                                      |
+| `--patience`        |                             75 | Early-stopping patience. If validation loss does not improve for this number of consecutive epochs, training is aborted                                                                      |
 | `--batch_size`      |                             32 | Size of training batch                                                                                                                                                                      |
 | `--missing_pattern` | ['single', 'block', 'profile'] | List of missing patterns to be tested. <br />  - Single: independently selects random samples <br /> - Block: randomly select contiguous block of samples <br /> - Profile: mask an entire log of a sequence  |
 | `--n_points`        |                            [1] | List of possible individual samples to be masked. Defaults to 1, larger integers imply multiple random indices independently selected per sequence to be masked                          |

@@ -30,7 +30,7 @@ class Configs:
         # experiment setup (Not used by shallow/classical methods)
         parser.add_argument("--slice_len", type=int, default=256, help="Length (number of samples) of the training/validation sequences")
         parser.add_argument("--epochs", type=int, default=500, help="Maximum number of training epochs.")
-        parser.add_argument("--patience", type=int, default=10,
+        parser.add_argument("--patience", type=int, default=75,
                             help="Early-stopping patience. Aborts training if validation loss does not improve for this number of consecutive epochs.")
         parser.add_argument("--batch_size", type=int, default=32, help="Number of sequences in each training batch")
         

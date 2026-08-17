@@ -36,7 +36,7 @@ class BayesianNNImputer:
         num_models: int,
         batch_size: int = 32,
         epochs: int = 300,
-        patience: int = 15,
+        patience: int = 75,
         device: Optional[Union[str, torch.device]] = None,
         learning_rate: float = 1e-3,
         hidden_size: int = 64,
