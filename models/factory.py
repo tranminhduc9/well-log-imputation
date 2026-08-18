@@ -27,6 +27,8 @@ _MODEL_REGISTRY: dict[str, _ModelRegistration] = {
     "unet": _ModelRegistration("unet", "UNetModel", uses_optimizer=True),
     "bayesnn": _ModelRegistration("bayesian_nn", "BayesianNNModel"),
     "bayessnn": _ModelRegistration("bayesian_nn", "BayesianNNModel"),
+    "np": _ModelRegistration("neural_process", "NPModel"),
+    "anp_standard": _ModelRegistration("attentive_neural_process", "StandardANPModel"),
     "anp": _ModelRegistration("attention_neural_process", "ANPModel"),
 }
 

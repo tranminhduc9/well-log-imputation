@@ -10,7 +10,7 @@ import torch
 from models import MODEL_NAMES
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_DATASET_DIR = PROJECT_ROOT / "data" / "imputation-processed-datasets"
+DEFAULT_DATASET_DIR = PROJECT_ROOT / "imputation-processed-datasets"
 
 class Configs:
     def __init__(self):

@@ -1,7 +1,7 @@
 # Tổng hợp hyperparameters
 
 Tài liệu này tổng hợp các giá trị đang được sử dụng bởi `main.py`, `cfg.py` và
-8 model xuất hiện trong `notebook.ipynb`. Các bảng bên dưới chỉ ghi những tham
+10 model xuất hiện trong `notebook.ipynb`. Các bảng bên dưới chỉ ghi những tham
 số được project thiết lập rõ ràng; tham số không được truyền vào thư viện sẽ
 dùng mặc định của phiên bản thư viện được cài đặt.
 
@@ -16,6 +16,8 @@ dùng mặc định của phiên bản thư viện được cài đặt.
 | `xgboost` | XGBoost | `models/xgboost.py` | — |
 | `unet` | 1D U-Net | `models/unet.py` | — |
 | `saits` | SAITS | `models/saits.py` | — |
+| `np` | Neural Process (mean aggregation) | `models/neural_process.py` | — |
+| `anp_standard` | Attentive Neural Process không depth penalty | `models/attentive_neural_process.py` | — |
 | `anp` | Depth-aware Attentive Neural Process | `models/attention_neural_process.py` | — |
 
 ## 2. Cấu hình mặc định khi chạy `main.py`
@@ -30,7 +32,7 @@ dùng mặc định của phiên bản thư viện được cài đặt.
 | `--n_folds` | `5` | Số fold cross-validation |
 | `--seed`, `-s` | `17076` | Seed dùng cho bộ sinh số ngẫu nhiên |
 | `--dataset_name` | `geolink` | Một trong `geolink`, `taranaki`, `teapot` |
-| `--dataset_dir` | `data/imputation-processed-datasets` | Thư mục chứa các file `.npy` đã xử lý |
+| `--dataset_dir` | `<project>/imputation-processed-datasets` | Thư mục chứa các file `.npy` đã xử lý |
 | `--logs` | `GR DTC RHOB NPHI` | Danh sách feature theo đúng thứ tự trong array |
 | `n_features` | `4` | Được suy ra bằng `len(logs)`, không truyền trực tiếp qua CLI |
 | `--model` | `saits` | Model được chọn; xem danh sách ở mục 1 |
@@ -40,11 +42,11 @@ dùng mặc định của phiên bản thư viện được cài đặt.
 
 | Tham số CLI | Mặc định | Model sử dụng |
 |---|---:|---|
-| `--slice_len` | `256` | SAITS, U-Net, ANP; được truyền thành `seq_len`/`n_steps` |
-| `--epochs` | `500` | SAITS, U-Net, BayesNN, ANP |
-| `--patience` | `50` | Early stopping của SAITS, U-Net, BayesNN, ANP |
-| `--batch_size` | `32` | SAITS, U-Net, ANP; BayesNN áp dụng quy tắc riêng bên dưới |
-| `--lr` | `1e-3` | SAITS/U-Net qua optimizer; BayesNN dùng trực tiếp; ANP giới hạn tối đa `3e-4` |
+| `--slice_len` | `256` | SAITS, U-Net, họ NP; được truyền thành `seq_len`/`n_steps` |
+| `--epochs` | `500` | SAITS, U-Net, BayesNN, họ NP |
+| `--patience` | `50` | Early stopping của SAITS, U-Net, BayesNN, họ NP |
+| `--batch_size` | `32` | SAITS, U-Net, họ NP; BayesNN áp dụng quy tắc riêng bên dưới |
+| `--lr` | `1e-3` | SAITS/U-Net qua optimizer; BayesNN dùng trực tiếp; họ NP giới hạn tối đa `3e-4` |
 | `--optimizer` | `adam` | `adam` hoặc `adamw`; chỉ SAITS và U-Net lấy optimizer từ CLI |
 
 ### 2.3 Missing-pattern experiments
@@ -208,7 +210,7 @@ Gaussian học được bằng reparameterization, thay vì MC Dropout.
 BayesNN dùng `--lr` trực tiếp nhưng không dùng lựa chọn `--optimizer`; optimizer
 luôn là PyTorch `Adam`.
 
-### 3.8 Depth-aware Attentive Neural Process (`anp`)
+### 3.8 Neural Process family (`np`, `anp_standard`, `anp`)
 
 | Nhóm | Tham số | Giá trị mặc định hiệu lực |
 |---|---|---:|
@@ -216,8 +218,8 @@ luôn là PyTorch `Adam`.
 | Input | `n_features` | `len(logs) = 4` |
 | Kiến trúc | `hidden_dim` | `128` |
 | Kiến trúc | `latent_dim` | `32` |
-| Attention | `n_heads` | `4` |
-| Attention | `initial_depth_scale` | `0.2` |
+| Attention (`anp_standard`, `anp`) | `n_heads` | `4` |
+| Depth penalty (chỉ `anp`) | `initial_depth_scale` | `0.2` |
 | Regularization | `dropout` | `0.1` |
 | Training | `batch_size` | `32` |
 | Training | `epochs` | `500` |
@@ -235,10 +237,19 @@ luôn là PyTorch `Adam`.
 | Prediction interval | z-score | `1.6448536269514722` |
 | Prediction interval | Coverage | `90%` |
 
-Các MLP encoder, depth encoder, latent encoder và decoder đều có hai hidden
-layer kích thước `hidden_dim`, activation `ReLU`, và dropout `0.1`. ANP giới hạn
-learning rate ở `3e-4` để ổn định Gaussian variance head; optimizer luôn là
-PyTorch `AdamW`, không phụ thuộc lựa chọn `--optimizer`.
+Ba model giữ nguyên latent encoder, decoder, Gaussian head, loss, lịch KL,
+optimizer và inference sampling. Khác biệt duy nhất nằm ở deterministic path:
+
+- `np`: mean pooling các context representation, không có attention;
+- `anp_standard`: scaled dot-product multi-head cross-attention, không cộng
+  penalty theo khoảng cách depth;
+- `anp`: cùng cross-attention nhưng score trừ thêm
+  `|depth_query - depth_key| / learned_depth_scale` cho từng head.
+
+Các MLP dùng hai hidden layer kích thước `hidden_dim`, activation `ReLU`, và
+dropout `0.1`. Họ NP giới hạn learning rate ở `3e-4` để ổn định Gaussian
+variance head; optimizer luôn là PyTorch `AdamW`, không phụ thuộc lựa chọn
+`--optimizer`.
 
 ## 4. Mặc định khi gọi `ModelFactory` trực tiếp
 

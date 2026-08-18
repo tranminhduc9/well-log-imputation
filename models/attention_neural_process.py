@@ -127,6 +127,8 @@ class AttentionNeuralProcess(nn.Module):
     normalized per sequence; otherwise sample position in ``[-1, 1]`` is used.
     """
 
+    model_label = "ANP+Depth"
+
     def __init__(
         self,
         encoder: Optional[nn.Module] = None,
@@ -452,13 +454,13 @@ class AttentionNeuralProcess(nn.Module):
                     self.optimizer.step()
 
             if not torch.isfinite(loss):
-                raise ValueError("ANP produced a non-finite loss")
+                raise ValueError(f"{self.model_label} produced a non-finite loss")
             batch_size = batch["X"].shape[0]
             for name, value in components.items():
                 totals[name] += float(value.detach()) * batch_size
             total_samples += batch_size
         if total_samples == 0:
-            raise ValueError("ANP received an empty dataset")
+            raise ValueError(f"{self.model_label} received an empty dataset")
         return {name: value / total_samples for name, value in totals.items()}
 
     def _train_epoch(self, loader: DataLoader) -> dict[str, float]:
@@ -503,7 +505,7 @@ class AttentionNeuralProcess(nn.Module):
 
             if epoch == 0 or (epoch + 1) % 10 == 0:
                 print(
-                    f"ANP epoch {epoch + 1}/{self.epochs} - "
+                    f"{self.model_label} epoch {epoch + 1}/{self.epochs} - "
                     f"train loss: {train_metrics['loss']:.6f} - "
                     f"val MAE: {validation_metrics['mae']:.6f} - "
                     f"val NLL: {validation_metrics['missing_nll']:.6f} - "
@@ -515,7 +517,9 @@ class AttentionNeuralProcess(nn.Module):
                 break
 
         if self.best_model_dict is None:
-            raise RuntimeError("ANP training did not produce a valid checkpoint")
+            raise RuntimeError(
+                f"{self.model_label} training did not produce a valid checkpoint"
+            )
         self.load_state_dict(self.best_model_dict)
         self.eval()
         self.is_fitted = True

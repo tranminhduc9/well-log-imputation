@@ -66,13 +66,13 @@ Assume you have preprocessed the Geolink dataset, using 5 folds, 4 logs (GR, DTC
 To test some imputation methods on the default experiments of the Benchmark you could run in the terminal:
 ```bash
 # Evaluates the SAITS model on the default experiments of the benchmark in the Geolink dataset
-python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds 5 --logs GR DTC RHOB NPHI --model saits
+python main.py --dataset_name geolink --dataset_dir geolink_dataset --n_folds 5 --logs GR DTC RHOB NPHI --model saits
 ```
 
 To test some imputation method on specific missing patterns you could run in the terminal:
 ```bash
 # Evaluates the SAITS model in the Geolink dataset using the Block missing pattern of length 150
-python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds 5 --logs GR DTC RHOB NPHI --model saits --missing_pattern block --b_size 150
+python main.py --dataset_name geolink --dataset_dir geolink_dataset --n_folds 5 --logs GR DTC RHOB NPHI --model saits --missing_pattern block --blocks_size 150
 ```
 
 ### Key Parameters:
@@ -83,7 +83,7 @@ python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds
 | `--n_folds`         |                              5 | Number of folds that the dataset was partitioned                                                                                                                                            |
 | `--seed`            |                          17076 | Random seed                                                                                                                                                                                 |
 | `--dataset_name`    |                      'geolink' | The name of the dataset (the name used to create the .npy files)                                                                                                                            |
-| `--dataset_dir`     |            'preprocessed_data' | Path to the processed dataset (the folder that contains the .npy files)                                                                                                                     |
+| `--dataset_dir`     | 'imputation-processed-datasets' | Path to the processed dataset (the folder that contains the .npy files)                                                                                                                     |
 | `--logs`            |  ['GR', 'DTC', 'RHOB', 'NPHI'] | List of the logs present in the processed dataset <br /> (the order in the list is assumed as the same order of logs in  the stored processed slices)                                              |
 | `--slice_len`       |                            256 | Length of the sliced sequences of the processed dataset                                                                                                                                     |
 | `--epochs`          |                            500 | Maximum number of training epochs for deep methods                                                                                                                                          |
@@ -93,7 +93,7 @@ python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds
 | `--n_points`        |                            [1] | List of possible individual samples to be masked. Defaults to 1, larger integers imply multiple random indices independently selected per sequence to be masked                          |
 | `--blocks_size`     |                      [20, 100] | List of possible block lengths to be masked. Each value creates a new experiment                                                                                                         |
 | `--profiles`        |                       ['RAND'] | List of logs to be masked, if 'profile' is one of the tested missing patterns (when 'RAND', each test sequence has a random log masked)                                                    |
-| `--model`           |                        'saits' | Name of the model to be evaluated <br /> (includes uncertainty-aware `qrf` and `bayesnn`)                                                                                                  |
+| `--model`           |                        'saits' | Name of the model to be evaluated <br /> (includes the comparable `np`, `anp_standard`, and depth-aware `anp` family)                                                                       |
 | `--lr`              |                           1e-3 | Learning rate used in the optimizer                                                                                                                                                         |
 | `--optimizer`       |                         'adam' | Name of the optimizer used in training (either 'adam' or 'adamw')                                                                                                                            |
 
@@ -105,7 +105,14 @@ python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds
 - 'xgboost': XGBoost Regressor [[source]](https://xgboost.readthedocs.io/en/stable/python/python_api.html#xgboost.XGBRegressor)
 - 'saits': SAITS (Self-Attention Imputation Time Series) [[source]](https://github.com/WenjieDu/PyPOTS/tree/main/pypots/imputation/saits) [[paper]](https://arxiv.org/pdf/2202.08516)
 - 'unet': UNet based imputation method [[paper]](https://arxiv.org/pdf/1505.04597.pdf)
-- 'anp': Depth-aware Attentive Neural Process with predictive intervals
+- 'np': basic Neural Process with mean context aggregation and predictive intervals
+- 'anp_standard': standard Attentive Neural Process without a depth-distance penalty
+- 'anp': depth-aware Attentive Neural Process with predictive intervals
+
+The three Neural Process variants share the same encoder/decoder dimensions,
+latent path, objective, optimizer, early stopping, and inference sampling.
+This keeps the baseline comparison focused on mean aggregation vs standard
+cross-attention vs depth-aware cross-attention.
 
 ### Model architecture
 
@@ -171,7 +178,7 @@ this registry, so no second model list needs to be maintained.
 With these two steps, your method is ready to be tested using this code implementation and you should be able to execute in the terminal:
 ```bash
 # Evaluates mymodel on the default experiments of the benchmark in the Geolink dataset
-python main.py --dataset_name geolink --dataset_folder geolink_dataset --n_folds 5 --logs GR DTC RHOB NPHI --model mymodel
+python main.py --dataset_name geolink --dataset_dir geolink_dataset --n_folds 5 --logs GR DTC RHOB NPHI --model mymodel
 ```
 to evaluate your method
 
