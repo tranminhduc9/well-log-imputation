@@ -56,4 +56,5 @@ class RandomForestModel(AbstractModel):
             max_depth=None,
             min_samples_leaf=1,
             min_samples_split=2,
+            random_state=self.config.seed,
         )

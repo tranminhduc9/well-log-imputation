@@ -45,3 +45,22 @@ def cal_cc(class_predictions, targets, masks):
         return 0.0
 
     return float(np.corrcoef(targets, class_predictions)[0, 1])
+
+
+def cal_mape(class_predictions, targets, masks, epsilon=1e-8):
+    """Calculate MAPE (%) on masked, finite target/prediction pairs.
+
+    ``epsilon`` keeps the metric finite when a normalized target is zero.
+    """
+
+    mask = masks.astype(bool)
+    predictions = np.asarray(class_predictions)[mask]
+    target_values = np.asarray(targets)[mask]
+    finite = np.isfinite(predictions) & np.isfinite(target_values)
+    if not np.any(finite):
+        return 0.0
+
+    predictions = predictions[finite]
+    target_values = target_values[finite]
+    denominator = np.maximum(np.abs(target_values), epsilon)
+    return float(100.0 * np.mean(np.abs(predictions - target_values) / denominator))

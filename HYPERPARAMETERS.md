@@ -30,7 +30,7 @@ dùng mặc định của phiên bản thư viện được cài đặt.
 |---|---:|---|
 | `--output_dir` | `trained_models` | Thư mục log, trọng số và prediction artifacts |
 | `--n_folds` | `5` | Số fold cross-validation |
-| `--seed`, `-s` | `17076` | Seed dùng cho bộ sinh số ngẫu nhiên |
+| `--seed`, `-s` | `91205` | Seed dùng cho bộ sinh số ngẫu nhiên |
 | `--dataset_name` | `geolink` | Một trong `geolink`, `taranaki`, `teapot` |
 | `--dataset_dir` | `<project>/imputation-processed-datasets` | Thư mục chứa các file `.npy` đã xử lý |
 | `--logs` | `GR DTC RHOB NPHI` | Danh sách feature theo đúng thứ tự trong array |
@@ -85,7 +85,7 @@ Project huấn luyện một `RandomForestRegressor` độc lập cho mỗi feat
 | `max_depth` | `None` |
 | `min_samples_leaf` | `1` |
 | `min_samples_split` | `2` |
-| `random_state` | Không truyền; dùng mặc định của scikit-learn |
+| `random_state` | Theo `--seed` (`91205` mặc định) |
 
 ### 3.3 Quantile Random Forest (`qrf`, `quantilerf`)
 
@@ -95,13 +95,13 @@ phân phối prediction từ các tree.
 | Tham số | Giá trị |
 |---|---:|
 | `num_models` | `n_features` |
-| `n_estimators` | `100` |
+| `n_estimators` | `500` |
 | `max_depth` | `20` |
 | `min_samples_leaf` | `5` |
 | `min_samples_split` | `10` |
 | `max_samples` | `0.5` |
 | `n_jobs` | `-1` |
-| `random_state` | `17076` |
+| `random_state` | Theo `--seed` (`91205` mặc định) |
 | `lower_quantile` | `0.05` |
 | Point quantile | `0.50` |
 | `upper_quantile` | `0.95` |
@@ -122,7 +122,7 @@ Project huấn luyện một `XGBRegressor` độc lập cho mỗi feature.
 | `colsample_bytree` | `1.0` |
 | `reg_alpha` | `0.0` |
 | `learning_rate` | `0.1` |
-| `random_state` | Không truyền; dùng mặc định của XGBoost |
+| `random_state` | Theo `--seed` (`91205` mặc định) |
 
 Lưu ý: `learning_rate=0.1` của XGBoost là giá trị cố định trong model và không
 dùng `--lr` của CLI.
@@ -205,7 +205,7 @@ Gaussian học được bằng reparameterization, thay vì MC Dropout.
 | Inference | `prediction_batch_size` | `8192` |
 | Prediction | Point estimate | Ensemble mean |
 | Uncertainty | `std` | Empirical ensemble standard deviation |
-| Interval | `lower`, `upper` | Ensemble mean `+- 1 std` |
+| Interval | `lower`, `upper` | Khoảng hai phía 90%: ensemble mean `+- 1.6448536 std` |
 
 BayesNN dùng `--lr` trực tiếp nhưng không dùng lựa chọn `--optimizer`; optimizer
 luôn là PyTorch `Adam`.

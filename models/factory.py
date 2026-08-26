@@ -50,6 +50,7 @@ class ModelFactory:
         device: str = "cpu",
         output_dir: Path | str = ".",
         learning_rate: float = 1e-3,
+        seed: int = 91205,
     ) -> None:
         normalized_name = model_name.lower()
         if normalized_name not in _MODEL_REGISTRY:
@@ -67,6 +68,7 @@ class ModelFactory:
             patience=patience,
             optimizer=optimizer,
             learning_rate=learning_rate,
+            seed=seed,
             device=device,
             output_dir=output_dir,
         )

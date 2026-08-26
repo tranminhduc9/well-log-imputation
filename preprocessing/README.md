@@ -26,7 +26,7 @@ python processing.py --dataset_name geolink --dataset_dir geolink_root --use_las
 | `--n_folds`      | 5                             | Number of folds that the dataset was partitioned                                                                                                 |
 | `--slice_stride` | 256                           | The number of indices skipped from the starting point of last slice. Set equal or larger than the slice_size for no overlaping slices            |
 | `--slice_size`   | 256                           | Length of the sliced sequences                                                                                                                   |
-| `--seed`, `-s`   | 0                             | Random seed                                                                                                                                      |
+| `--seed`, `-s`   | 91205                         | Random seed                                                                                                                                      |
 | `--dataset_name` | 'geolink'                     | The name of the dataset (the name used to create the .npy files)                                                                                 |
 | `--dataset_dir`  | 'geolink_root'           | Path to the processed dataset (the folder that contains the .npy files)                                                                          |
 | `--use_las`      | False                         | If present, during load will try to read from .las files. By default tries to use a logs.csv file                                                |

@@ -23,6 +23,7 @@ class ModelConfig:
     patience: int = 50
     optimizer: Any = None
     learning_rate: float = 1e-3
+    seed: int = 91205
     device: str = "cpu"
     output_dir: Path | str = Path(".")
 

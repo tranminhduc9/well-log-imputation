@@ -15,7 +15,7 @@ logging.disable(logging.NOTSET)
 
 from models import ModelFactory
 from data import mask_X
-from utils.metrics import cal_r2, cal_cc
+from utils.metrics import cal_r2, cal_cc, cal_mape
 
 def select_optimizer(optimizer: str, lr: float):    
     '''
@@ -53,6 +53,7 @@ def loading_data(dataset_name: str, data_dir: str, fold: int) -> tuple[np.array,
         data_val = np.load(file = f)
         
     return data_train, data_val
+
 
 def get_dataset_dict(data: np.ndarray, mode: str, 
                      n_points: int = 1, 
@@ -134,6 +135,7 @@ def run_experiments(
         mode = experiment['mode']
         metrics[model_name][f'inference-time-{mode}'] = []
         metrics[model_name][f'validation-mae-{mode}'] = []
+        metrics[model_name][f'validation-mape-{mode}'] = []
         metrics[model_name][f'validation-mse-{mode}'] = []
         metrics[model_name][f'validation-rmse-{mode}'] = []
         metrics[model_name][f'validation-r2-{mode}'] = []
@@ -210,6 +212,7 @@ def run_experiments(
 
             ## Calculate metrics on the ground truth (artificially-missing values):
             val_mae = calc_mae(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
+            val_mape = cal_mape(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
             val_mse = calc_mse(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
             val_rmse = calc_rmse(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
             val_r2 = cal_r2(model_imputation['imputation'], dataset_for_validating[mode]['X_intact'], dataset_for_validating[mode]['indicating_mask'])
@@ -282,6 +285,8 @@ def run_experiments(
             
             print(f'masking {mode} testing mean absolute error:{val_mae:.4f}')
             logging.info(f'masking {mode} testing mean absolute error:{val_mae:.4f}')
+            print(f'masking {mode} testing mean absolute percentage error:{val_mape:.4f}%')
+            logging.info(f'masking {mode} testing mean absolute percentage error:{val_mape:.4f}%')
             print(f'masking {mode} testing mean squared error:{val_mse:.4f}')
             logging.info(f'masking {mode} testing mean squared error:{val_mse:.4f}')
             print(f'masking {mode} testing mean root-mean squared error:{val_rmse:.4f}')
@@ -299,6 +304,7 @@ def run_experiments(
             ## Save metrics for the model:
             metrics[model_name][f'inference-time-{mode}'].append(inference_time_secs)
             metrics[model_name][f'validation-mae-{mode}'].append(val_mae)
+            metrics[model_name][f'validation-mape-{mode}'].append(val_mape)
             metrics[model_name][f'validation-mse-{mode}'].append(val_mse)
             metrics[model_name][f'validation-rmse-{mode}'].append(val_rmse)
             metrics[model_name][f'validation-r2-{mode}'].append(val_r2)
@@ -354,6 +360,7 @@ def main(cfg):
         patience=cfg.patience,
         optimizer=optim,
         learning_rate=cfg.lr,
+        seed=cfg.seed,
         device=cfg.device,
         output_dir=cfg.output_dir,
     )

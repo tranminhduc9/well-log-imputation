@@ -58,4 +58,5 @@ class XGBoostModel(AbstractModel):
             colsample_bytree=1,
             reg_alpha=0.0,
             learning_rate=0.1,
+            random_state=self.config.seed,
         )

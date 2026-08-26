@@ -17,7 +17,7 @@ class Arguments:
         parser.add_argument("--slice_stride", type=int, default=256, 
                             help="the number of indices skiped from the starting point of last slice. Set equal or larger than the slice_size for no overlaping slices")
         parser.add_argument("--slice_size", type=int, default=256, help="number of indices (samples) in each slice of a log")
-        parser.add_argument("--seed", "-s", type=int, default=0, help="random seed")
+        parser.add_argument("--seed", "-s", type=int, default=91205, help="random seed")
         
         # dataset
         parser.add_argument("--dataset_name", type=str.lower, default="geolink", choices=["geolink", "taranaki", "teapot"])

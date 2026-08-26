@@ -83,11 +83,11 @@ class QuantileRandomForestModel(AbstractModel):
             self.config.n_features,
             # QRF trains one forest per feature. These bounded defaults keep
             # the full depth-sample benchmark practical on CPU.
-            n_estimators=100,
+            n_estimators=500,
             max_depth=20,
             min_samples_leaf=5,
             min_samples_split=10,
             max_samples=0.5,
             n_jobs=-1,
-            random_state=17076,
+            random_state=self.config.seed,
         )

@@ -19,7 +19,7 @@ class Configs:
         # general
         parser.add_argument("--output_dir", type=Path, default=Path("trained_models"), help="Path to save logs and model weights")
         parser.add_argument("--n_folds", type=int, default=5, help="Number of folds that the data is partioned")
-        parser.add_argument("--seed", "-s", type=int, default=17076, help="Seed used for random generators")
+        parser.add_argument("--seed", "-s", type=int, default=91205, help="Seed used for random generators")
         
         # dataset
         parser.add_argument("--dataset_name", type=str.lower, default="geolink", choices=["geolink", "taranaki", "teapot"])

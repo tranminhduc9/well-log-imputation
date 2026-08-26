@@ -233,7 +233,7 @@ def process_data(data: pd.DataFrame,
                  slice_size: int = 256,
                  slice_stride: int = 256,
                  selected_logs: list[str] = ['GR', 'DTC', 'RHOB', 'NPHI'],
-                 seed: int = 14273) -> None:
+                 seed: int = 91205) -> None:
     '''
     Process a dataset for the use in the imputation benchmark. It divides the wells into `n_folds` groups for training/validation
     For each fold, computes slices for all well in that fold training and validation partitions. These slices are saved into .npy files for future use in adition to some metadata
