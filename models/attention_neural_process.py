@@ -206,6 +206,7 @@ class AttentionNeuralProcess(nn.Module):
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self.best_model_dict: Optional[dict[str, torch.Tensor]] = None
         self.best_loss = float("inf")
+        self.training_history: list[dict[str, float]] = []
         self.is_fitted = False
         self.to(self.device)
 
@@ -484,6 +485,7 @@ class AttentionNeuralProcess(nn.Module):
         )
         self.best_loss = float("inf")
         self.best_model_dict = None
+        self.training_history = []
         patience_left = self.patience
 
         for epoch in range(self.epochs):
@@ -496,6 +498,19 @@ class AttentionNeuralProcess(nn.Module):
             )
             selection_metric = validation_metrics["mae"]
             scheduler.step(selection_metric)
+            current_lr = float(self.optimizer.param_groups[0]["lr"])
+            self.training_history.append(
+                {
+                    "epoch": float(epoch + 1),
+                    **{f"train_{name}": float(value) for name, value in train_metrics.items()},
+                    **{
+                        f"val_{name}": float(value)
+                        for name, value in validation_metrics.items()
+                    },
+                    "kl_weight": float(self._active_kl_weight),
+                    "learning_rate": current_lr,
+                }
+            )
             if selection_metric < self.best_loss:
                 self.best_loss = selection_metric
                 self.best_model_dict = deepcopy(self.state_dict())
