@@ -20,6 +20,13 @@ class BRITSConfig(ModelConfig):
     hidden_size: int = 64
     consistency_weight: float = 0.1
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.hidden_size <= 0:
+            raise ValueError("hidden_size must be positive.")
+        if self.consistency_weight < 0:
+            raise ValueError("consistency_weight must be non-negative.")
+
 
 class TemporalDecay(nn.Module):
     def __init__(self, input_size, output_size, diagonal=False):
@@ -87,7 +94,7 @@ class RITS(nn.Module):
             hidden, cell = self.rnn(torch.cat((completed, mask), 1), (hidden, cell))
             imputations.append(completed)
 
-        return torch.stack(imputations, 1), loss / sequence_length
+        return torch.stack(imputations, 1), loss / (sequence_length * 3)
 
 
 class BRITSNetwork(nn.Module):
@@ -119,11 +126,13 @@ def _masked_mae(prediction, target, mask):
 
 
 def _deltas(masks):
-    """Depth steps since the latest observation for every log."""
+    """Unit depth steps since the latest observation for every log."""
 
-    deltas = torch.ones_like(masks)
+    deltas = torch.zeros_like(masks)
     for step in range(1, masks.shape[1]):
-        deltas[:, step] += (1 - masks[:, step]) * deltas[:, step - 1]
+        deltas[:, step] = (
+            1 + (1 - masks[:, step - 1]) * deltas[:, step - 1]
+        )
     return deltas
 
 
