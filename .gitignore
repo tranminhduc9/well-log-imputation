@@ -1,0 +1,60 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Local datasets and generated artifacts
+/data/raw/*
+/data/processed/*
+artifacts/
+checkpoints/
+outputs/
+runs/
+
+# Trained model files
+*.ckpt
+*.joblib
+*.onnx
+*.pkl
+*.pickle
+*.pt
+*.pth
+
+# Keep empty data directories in the repository when placeholders are added
+!data/raw/.gitkeep
+!data/processed/.gitkeep

@@ -1,0 +1,6 @@
+lasio
+numpy
+pandas
+scikit-learn
+torch
+xgboost>=2.0
