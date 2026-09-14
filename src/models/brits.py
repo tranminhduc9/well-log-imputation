@@ -1,6 +1,8 @@
 """Core BRITS model for multivariate well-log imputation."""
 
 from dataclasses import dataclass
+import logging
+import time
 
 import numpy as np
 import torch
@@ -8,6 +10,9 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.models.model import AbstractModel, ModelConfig
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,7 @@ class _BRITSBackend:
             config.hidden_size,
             config.consistency_weight,
         ).to(self.device)
+        self.training_history = []
 
     def fit(self, train_set, val_set=None):
         values = np.asarray(train_set["X"], dtype=np.float32)
@@ -147,7 +153,10 @@ class _BRITSBackend:
         )
 
         self.network.train()
-        for _ in range(self.config.epochs):
+        self.training_history = []
+        training_started = time.perf_counter()
+        for epoch in range(self.config.epochs):
+            epoch_loss = 0.0
             for (batch,) in loader:
                 batch = batch.to(self.device)
                 masks = torch.isfinite(batch).float()
@@ -156,6 +165,20 @@ class _BRITSBackend:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                epoch_loss += loss.item()
+
+            mean_loss = epoch_loss / len(loader)
+            self.training_history.append(
+                {"epoch": epoch + 1, "loss": mean_loss}
+            )
+            elapsed = time.perf_counter() - training_started
+            LOGGER.info(
+                "BRITS epoch %d/%d | loss=%.6f | elapsed=%.1fs",
+                epoch + 1,
+                self.config.epochs,
+                mean_loss,
+                elapsed,
+            )
 
     def predict(self, dataset):
         values = np.asarray(dataset["X"], dtype=np.float32)

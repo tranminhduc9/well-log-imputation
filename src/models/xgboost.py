@@ -1,11 +1,16 @@
 """XGBoost baseline for well-log imputation."""
 
 from dataclasses import dataclass
+import logging
+import time
 
 import numpy as np
 from xgboost import XGBRegressor
 
 from src.models.model import AbstractModel, ModelConfig
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,7 @@ class _XGBoostBackend:
     def __init__(self, config: XGBoostConfig) -> None:
         self.config = config
         self.models: list[XGBRegressor] = []
+        self.training_history = []
 
     def _features(self, values: np.ndarray, target: int) -> np.ndarray:
         """Use the other logs and normalized position within each segment."""
@@ -48,14 +54,22 @@ class _XGBoostBackend:
         values = np.asarray(train_set["X"], dtype=float)
         targets = values.reshape(-1, values.shape[-1])
         self.models = []
+        self.training_history = []
 
         for target in range(values.shape[-1]):
+            started = time.perf_counter()
+            LOGGER.info(
+                "XGBoost log %d/%d started",
+                target + 1,
+                values.shape[-1],
+            )
             observed = np.isfinite(targets[:, target])
             if not np.any(observed):
                 raise ValueError(f"Training log {target} contains no observed values.")
 
             model = XGBRegressor(
                 objective="reg:squarederror",
+                eval_metric="rmse",
                 tree_method="hist",
                 device=self.config.device,
                 n_estimators=self.config.n_estimators,
@@ -66,11 +80,53 @@ class _XGBoostBackend:
                 n_jobs=self.config.n_jobs,
                 random_state=self.config.seed,
             )
+            train_features = self._features(values, target)[observed]
+            train_targets = targets[observed, target]
+            evaluation_sets = [(train_features, train_targets)]
+
+            if val_set is not None and {
+                "X",
+                "X_intact",
+                "indicating_mask",
+            }.issubset(val_set):
+                validation_values = np.asarray(val_set["X"], dtype=float)
+                validation_targets = np.asarray(
+                    val_set["X_intact"], dtype=float
+                ).reshape(-1, values.shape[-1])
+                validation_mask = np.asarray(
+                    val_set["indicating_mask"], dtype=bool
+                )[..., target].reshape(-1)
+                if np.any(validation_mask):
+                    evaluation_sets.append(
+                        (
+                            self._features(validation_values, target)[validation_mask],
+                            validation_targets[validation_mask, target],
+                        )
+                    )
+
             model.fit(
-                self._features(values, target)[observed],
-                targets[observed, target],
+                train_features,
+                train_targets,
+                eval_set=evaluation_sets,
+                verbose=False,
             )
             self.models.append(model)
+            history = model.evals_result()
+            self.training_history.append(
+                {
+                    "log_index": target,
+                    "train_rmse": history["validation_0"]["rmse"],
+                    "validation_rmse": history.get("validation_1", {}).get(
+                        "rmse", []
+                    ),
+                }
+            )
+            LOGGER.info(
+                "XGBoost log %d/%d finished in %.1f seconds",
+                target + 1,
+                values.shape[-1],
+                time.perf_counter() - started,
+            )
 
     def predict(self, dataset):
         values = np.asarray(dataset["X"], dtype=float)
