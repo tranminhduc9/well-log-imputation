@@ -19,6 +19,7 @@ LOGGER = logging.getLogger(__name__)
 class BRITSConfig(ModelConfig):
     hidden_size: int = 64
     consistency_weight: float = 0.1
+    min_delta: float = 1e-4
 
     def __post_init__(self):
         super().__post_init__()
@@ -26,6 +27,8 @@ class BRITSConfig(ModelConfig):
             raise ValueError("hidden_size must be positive.")
         if self.consistency_weight < 0:
             raise ValueError("consistency_weight must be non-negative.")
+        if self.min_delta < 0:
+            raise ValueError("min_delta must be non-negative.")
 
 
 class TemporalDecay(nn.Module):
@@ -163,6 +166,8 @@ class _BRITSBackend:
 
         self.network.train()
         self.training_history = []
+        best_loss = float("inf")
+        epochs_without_improvement = 0
         training_started = time.perf_counter()
         for epoch in range(self.config.epochs):
             epoch_loss = 0.0
@@ -188,6 +193,19 @@ class _BRITSBackend:
                 mean_loss,
                 elapsed,
             )
+
+            if best_loss - mean_loss > self.config.min_delta:
+                best_loss = mean_loss
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= self.config.patience:
+                    LOGGER.info(
+                        "BRITS early stopping at epoch %d | best loss=%.6f",
+                        epoch + 1,
+                        best_loss,
+                    )
+                    break
 
     def predict(self, dataset):
         values = np.asarray(dataset["X"], dtype=np.float32)
