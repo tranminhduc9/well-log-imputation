@@ -1,6 +1,7 @@
 """Core BRITS model for multivariate well-log imputation."""
 
 from dataclasses import dataclass
+from copy import deepcopy
 import logging
 import time
 
@@ -151,6 +152,7 @@ class _BRITSBackend:
             config.consistency_weight,
         ).to(self.device)
         self.training_history = []
+        self.best_epoch = None
 
     def fit(self, train_set, val_set=None):
         values = np.asarray(train_set["X"], dtype=np.float32)
@@ -164,12 +166,15 @@ class _BRITSBackend:
             lr=self.config.learning_rate,
         )
 
-        self.network.train()
         self.training_history = []
-        best_loss = float("inf")
+        self.best_epoch = None
+        best_score = float("inf")
+        patience_score = float("inf")
+        best_state = None
         epochs_without_improvement = 0
         training_started = time.perf_counter()
         for epoch in range(self.config.epochs):
+            self.network.train()
             epoch_loss = 0.0
             for (batch,) in loader:
                 batch = batch.to(self.device)
@@ -182,30 +187,71 @@ class _BRITSBackend:
                 epoch_loss += loss.item()
 
             mean_loss = epoch_loss / len(loader)
+            validation_rmse = self._validation_rmse(val_set) if val_set is not None else None
+            score = validation_rmse if validation_rmse is not None else mean_loss
+            if not np.isfinite(score):
+                raise RuntimeError(f"BRITS produced a non-finite selection score at epoch {epoch + 1}.")
             self.training_history.append(
-                {"epoch": epoch + 1, "loss": mean_loss}
+                {"epoch": epoch + 1, "loss": mean_loss, "validation_rmse": validation_rmse}
             )
             elapsed = time.perf_counter() - training_started
             LOGGER.info(
-                "BRITS epoch %d/%d | loss=%.6f | elapsed=%.1fs",
+                "BRITS epoch %d/%d | loss=%.6f | validation_rmse=%s | elapsed=%.1fs",
                 epoch + 1,
                 self.config.epochs,
                 mean_loss,
+                f"{validation_rmse:.6f}" if validation_rmse is not None else "n/a",
                 elapsed,
             )
 
-            if best_loss - mean_loss > self.config.min_delta:
-                best_loss = mean_loss
+            if score < best_score:
+                best_score = score
+                best_state = deepcopy(self.network.state_dict())
+                self.best_epoch = epoch + 1
+            if patience_score - score > self.config.min_delta:
+                patience_score = score
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
                 if epochs_without_improvement >= self.config.patience:
                     LOGGER.info(
-                        "BRITS early stopping at epoch %d | best loss=%.6f",
+                        "BRITS early stopping at epoch %d | best epoch=%d | score=%.6f",
                         epoch + 1,
-                        best_loss,
+                        self.best_epoch,
+                        best_score,
                     )
                     break
+
+        if best_state is not None:
+            self.network.load_state_dict(best_state)
+
+    def _validation_rmse(self, dataset):
+        scenarios = dataset.get("validation_scenarios")
+        if scenarios is not None:
+            if not scenarios:
+                raise ValueError("BRITS validation_scenarios must not be empty.")
+            return float(np.mean([self._validation_rmse(data) for data in scenarios.values()]))
+        if "X_intact" not in dataset or "indicating_mask" not in dataset:
+            raise ValueError("BRITS validation requires X_intact and indicating_mask.")
+        inputs = np.asarray(dataset["X"], dtype=np.float32)
+        truth = np.asarray(dataset["X_intact"], dtype=np.float32)
+        indicating_mask = np.asarray(dataset["indicating_mask"], dtype=bool)
+        squared_error = 0.0
+        count = 0
+        self.network.eval()
+        with torch.no_grad():
+            for start in range(0, len(inputs), self.config.batch_size):
+                end = start + self.config.batch_size
+                batch = torch.from_numpy(inputs[start:end]).to(self.device)
+                observed = torch.isfinite(batch).float()
+                predictions, _ = self.network(torch.nan_to_num(batch), observed)
+                valid = indicating_mask[start:end] & np.isfinite(truth[start:end])
+                difference = predictions.cpu().numpy()[valid] - truth[start:end][valid]
+                squared_error += float(np.square(difference.astype(np.float64)).sum())
+                count += int(valid.sum())
+        if count == 0:
+            raise ValueError("BRITS validation has no masked values to score.")
+        return float(np.sqrt(squared_error / count))
 
     def predict(self, dataset):
         values = np.asarray(dataset["X"], dtype=np.float32)
