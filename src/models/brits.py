@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from copy import deepcopy
 import logging
+import math
 import time
 
 import numpy as np
@@ -21,6 +22,9 @@ class BRITSConfig(ModelConfig):
     hidden_size: int = 64
     consistency_weight: float = 0.1
     min_delta: float = 1e-4
+    # Keep PyPOTS-compatible optimization by default. Experiments can opt in
+    # to regularization (the final GeoLink notebook uses 1e-5).
+    weight_decay: float = 0.0
 
     def __post_init__(self):
         super().__post_init__()
@@ -30,15 +34,24 @@ class BRITSConfig(ModelConfig):
             raise ValueError("consistency_weight must be non-negative.")
         if self.min_delta < 0:
             raise ValueError("min_delta must be non-negative.")
+        if self.weight_decay < 0:
+            raise ValueError("weight_decay must be non-negative.")
 
 
 class TemporalDecay(nn.Module):
     def __init__(self, input_size, output_size, diagonal=False):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(output_size, input_size))
-        self.bias = nn.Parameter(torch.zeros(output_size))
+        self.bias = nn.Parameter(torch.empty(output_size))
         self.register_buffer("mask", torch.eye(input_size) if diagonal else None)
-        nn.init.xavier_uniform_(self.weight)
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        """Match the parameter initialization used by PyPOTS."""
+
+        bound = 1.0 / math.sqrt(self.weight.size(0))
+        nn.init.uniform_(self.weight, -bound, bound)
+        nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, delta):
         weight = self.weight if self.mask is None else self.weight * self.mask
@@ -49,9 +62,16 @@ class FeatureRegression(nn.Module):
     def __init__(self, n_features):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(n_features, n_features))
-        self.bias = nn.Parameter(torch.zeros(n_features))
+        self.bias = nn.Parameter(torch.empty(n_features))
         self.register_buffer("mask", 1 - torch.eye(n_features))
-        nn.init.xavier_uniform_(self.weight)
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        """Match the parameter initialization used by PyPOTS."""
+
+        bound = 1.0 / math.sqrt(self.weight.size(0))
+        nn.init.uniform_(self.weight, -bound, bound)
+        nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, values):
         return nn.functional.linear(values, self.weight * self.mask, self.bias)
@@ -164,6 +184,7 @@ class _BRITSBackend:
         optimizer = torch.optim.Adam(
             self.network.parameters(),
             lr=self.config.learning_rate,
+            weight_decay=self.config.weight_decay,
         )
 
         self.training_history = []
@@ -187,19 +208,34 @@ class _BRITSBackend:
                 epoch_loss += loss.item()
 
             mean_loss = epoch_loss / len(loader)
-            validation_rmse = self._validation_rmse(val_set) if val_set is not None else None
-            score = validation_rmse if validation_rmse is not None else mean_loss
+            validation = self._validation_metrics(val_set) if val_set is not None else None
+            validation_mse = None if validation is None else validation["mse"]
+            validation_rmse = None if validation is None else validation["rmse"]
+            # PyPOTS uses MSE as BRITS' default validation metric. For a
+            # multi-scenario monitor we use the unweighted mean scenario MSE.
+            score = validation_mse if validation_mse is not None else mean_loss
             if not np.isfinite(score):
                 raise RuntimeError(f"BRITS produced a non-finite selection score at epoch {epoch + 1}.")
-            self.training_history.append(
-                {"epoch": epoch + 1, "loss": mean_loss, "validation_rmse": validation_rmse}
-            )
+            history_point = {
+                "epoch": epoch + 1,
+                "loss": mean_loss,
+                "validation_mse": validation_mse,
+                "validation_rmse": validation_rmse,
+            }
+            if validation is not None:
+                for scenario, metrics in validation["by_scenario"].items():
+                    key = scenario.lower().replace("-", "_").replace(" ", "_")
+                    history_point[f"validation_{key}_mse"] = metrics["mse"]
+                    history_point[f"validation_{key}_rmse"] = metrics["rmse"]
+            self.training_history.append(history_point)
             elapsed = time.perf_counter() - training_started
             LOGGER.info(
-                "BRITS epoch %d/%d | loss=%.6f | validation_rmse=%s | elapsed=%.1fs",
+                "BRITS epoch %d/%d | loss=%.6f | validation_mse=%s | "
+                "validation_rmse=%s | elapsed=%.1fs",
                 epoch + 1,
                 self.config.epochs,
                 mean_loss,
+                f"{validation_mse:.6f}" if validation_mse is not None else "n/a",
                 f"{validation_rmse:.6f}" if validation_rmse is not None else "n/a",
                 elapsed,
             )
@@ -225,12 +261,20 @@ class _BRITSBackend:
         if best_state is not None:
             self.network.load_state_dict(best_state)
 
-    def _validation_rmse(self, dataset):
+    def _validation_metrics(self, dataset):
         scenarios = dataset.get("validation_scenarios")
         if scenarios is not None:
             if not scenarios:
                 raise ValueError("BRITS validation_scenarios must not be empty.")
-            return float(np.mean([self._validation_rmse(data) for data in scenarios.values()]))
+            by_scenario = {
+                name: self._validation_metrics(data)
+                for name, data in scenarios.items()
+            }
+            return {
+                "mse": float(np.mean([metrics["mse"] for metrics in by_scenario.values()])),
+                "rmse": float(np.mean([metrics["rmse"] for metrics in by_scenario.values()])),
+                "by_scenario": by_scenario,
+            }
         if "X_intact" not in dataset or "indicating_mask" not in dataset:
             raise ValueError("BRITS validation requires X_intact and indicating_mask.")
         inputs = np.asarray(dataset["X"], dtype=np.float32)
@@ -251,7 +295,13 @@ class _BRITSBackend:
                 count += int(valid.sum())
         if count == 0:
             raise ValueError("BRITS validation has no masked values to score.")
-        return float(np.sqrt(squared_error / count))
+        mse = float(squared_error / count)
+        return {"mse": mse, "rmse": float(np.sqrt(mse)), "by_scenario": {}}
+
+    def _validation_rmse(self, dataset):
+        """Retain the previous helper API for callers that only need RMSE."""
+
+        return self._validation_metrics(dataset)["rmse"]
 
     def predict(self, dataset):
         values = np.asarray(dataset["X"], dtype=np.float32)
