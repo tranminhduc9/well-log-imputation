@@ -19,6 +19,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.models.model import AbstractModel, ModelConfig
+from src.models.losses import masked_imputation_mae
 from src.preprocessing.pipeline import create_missing_mask
 
 
@@ -36,10 +37,13 @@ class SAITSConfig(ModelConfig):
     diagonal_attention_mask: bool = True
     ort_weight: float = 1.0
     mit_weight: float = 1.0
+    mit_reduction: str = "segment"
     min_delta: float = 1e-4
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.mit_reduction not in {"segment", "point"}:
+            raise ValueError("mit_reduction must be 'segment' or 'point'.")
         if self.n_layers <= 0 or self.d_model <= 0 or self.d_inner <= 0 or self.n_heads <= 0:
             raise ValueError("SAITS layer, model, feed-forward, and head sizes must be positive.")
         if self.d_model % self.n_heads:
@@ -208,8 +212,12 @@ class _SAITSBackend:
                     _masked_mae(part, batch_truth, batch_observed)
                     for part in (first, second, combined)
                 ) / 3
-                mit = _masked_mae(combined, batch_truth, batch_hidden)
+                mit = masked_imputation_mae(
+                    combined, batch_truth, batch_hidden, self.config.mit_reduction
+                )
                 loss = self.config.ort_weight * ort + self.config.mit_weight * mit
+                if not torch.isfinite(loss):
+                    raise RuntimeError("SAITS training loss is non-finite.")
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()

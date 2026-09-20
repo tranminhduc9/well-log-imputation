@@ -12,6 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.models.model import AbstractModel, ModelConfig
+from src.models.losses import masked_imputation_mae
 from src.preprocessing.pipeline import BLOCK_LENGTHS, MISSING_SCENARIOS
 
 
@@ -23,6 +24,7 @@ class BRITSConfig(ModelConfig):
     hidden_size: int = 64
     consistency_weight: float = 0.1
     mit_weight: float = 1.0
+    mit_reduction: str = "segment"
     masking_strategy: str = "mixed"
     masking_rate: float = 0.2
     gradient_clip: float = 1.0
@@ -34,6 +36,8 @@ class BRITSConfig(ModelConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.mit_reduction not in {"segment", "point"}:
+            raise ValueError("mit_reduction must be 'segment' or 'point'.")
         if self.hidden_size <= 0:
             raise ValueError("hidden_size must be positive.")
         if self.consistency_weight < 0:
@@ -297,8 +301,12 @@ class _BRITSBackend:
                 imputation, brits_loss, reconstruction, consistency = self.network(
                     batch, masks, return_components=True
                 )
-                mit = _masked_mae(imputation, batch_truth, batch_hidden)
+                mit = masked_imputation_mae(
+                    imputation, batch_truth, batch_hidden, self.config.mit_reduction
+                )
                 loss = brits_loss + self.config.mit_weight * mit
+                if not torch.isfinite(loss):
+                    raise RuntimeError("BRITS training loss is non-finite.")
                 optimizer.zero_grad()
                 loss.backward()
                 if self.config.gradient_clip > 0:
