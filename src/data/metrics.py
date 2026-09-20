@@ -7,14 +7,21 @@ def compute_imputation_metrics(
     truth: np.ndarray,
     imputation: np.ndarray,
     indicating_mask: np.ndarray,
+    *,
+    include_mape: bool = True,
 ) -> dict[str, float | int]:
     """Calculate metrics only where values were artificially removed."""
 
-    valid = (
-        indicating_mask.astype(bool)
-        & np.isfinite(truth)
-        & np.isfinite(imputation)
-    )
+    truth = np.asarray(truth, dtype=np.float64)
+    imputation = np.asarray(imputation, dtype=np.float64)
+    indicating_mask = np.asarray(indicating_mask)
+    if truth.shape != imputation.shape or truth.shape != indicating_mask.shape:
+        raise ValueError("Truth, imputation and indicating_mask must have identical shapes.")
+    if not np.isin(indicating_mask, [0, 1]).all():
+        raise ValueError("indicating_mask must be binary.")
+    valid = indicating_mask.astype(bool) & np.isfinite(truth)
+    if not np.isfinite(imputation[valid]).all():
+        raise ValueError("Non-finite predictions at scored positions.")
     if not np.any(valid):
         raise ValueError("No valid values are available for evaluation.")
 
@@ -31,11 +38,13 @@ def compute_imputation_metrics(
         else np.nan
     )
 
-    return {
+    result = {
         "mae": float(np.mean(np.abs(error))),
         "mse": float(mse),
         "rmse": float(np.sqrt(mse)),
-        "mape": float(mape),
         "r2": float(r2),
         "count": int(len(target)),
     }
+    if include_mape:
+        result["mape"] = float(mape)
+    return result
