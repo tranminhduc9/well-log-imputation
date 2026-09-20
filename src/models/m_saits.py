@@ -28,6 +28,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.models.model import AbstractModel, ModelConfig
+from src.preprocessing.pipeline import create_missing_mask
 
 
 LOGGER = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ class MSAITSConfig(ModelConfig):
     conv_expansion: int = 2
     dropout: float = 0.1
     attn_dropout: float = 0.1
+    masking_strategy: str = "mixed"
     masking_rate: float = 0.2
     diagonal_attention_mask: bool = True
     ort_weight: float = 1.0
@@ -86,6 +88,8 @@ class MSAITSConfig(ModelConfig):
             raise ValueError("M-SAITS dropout rates must be in [0, 1).")
         if not 0 < self.masking_rate < 1:
             raise ValueError("masking_rate must be in (0, 1).")
+        if self.masking_strategy not in {"mixed", "random"}:
+            raise ValueError("masking_strategy must be 'mixed' or 'random'.")
         if self.ort_weight < 0 or self.mit_weight < 0 or self.min_delta < 0:
             raise ValueError("M-SAITS loss weights and min_delta must be non-negative.")
         if self.ort_weight == self.mit_weight == 0:
@@ -354,6 +358,14 @@ class _MSAITSBackend:
         predefined = train_set.get("indicating_mask")
         if predefined is not None:
             hidden = np.asarray(predefined, dtype=bool) & finite_truth
+        elif self.config.masking_strategy == "mixed":
+            # Match training to the evaluation distribution.  With no explicit
+            # scenario, create_missing_mask independently samples Single,
+            # Block-20, Block-100, or Entire-Log for every segment.
+            hidden = create_missing_mask(
+                truth, random_state=self.config.seed + epoch
+            )
+            hidden &= input_observed
         else:
             generator = np.random.default_rng(self.config.seed + epoch)
             hidden = (

@@ -12,6 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.models.model import AbstractModel, ModelConfig
+from src.preprocessing.pipeline import BLOCK_LENGTHS, MISSING_SCENARIOS
 
 
 LOGGER = logging.getLogger(__name__)
@@ -21,6 +22,11 @@ LOGGER = logging.getLogger(__name__)
 class BRITSConfig(ModelConfig):
     hidden_size: int = 64
     consistency_weight: float = 0.1
+    mit_weight: float = 1.0
+    masking_strategy: str = "mixed"
+    masking_rate: float = 0.2
+    gradient_clip: float = 1.0
+    validation_metric: str = "rmse"
     min_delta: float = 1e-4
     # Keep PyPOTS-compatible optimization by default. Experiments can opt in
     # to regularization (the final GeoLink notebook uses 1e-5).
@@ -32,6 +38,18 @@ class BRITSConfig(ModelConfig):
             raise ValueError("hidden_size must be positive.")
         if self.consistency_weight < 0:
             raise ValueError("consistency_weight must be non-negative.")
+        if self.mit_weight < 0:
+            raise ValueError("mit_weight must be non-negative.")
+        if self.masking_strategy not in {"mixed", "random", "none"}:
+            raise ValueError(
+                "masking_strategy must be 'mixed', 'random', or 'none'."
+            )
+        if not 0 < self.masking_rate < 1:
+            raise ValueError("masking_rate must be in (0, 1).")
+        if self.gradient_clip < 0:
+            raise ValueError("gradient_clip must be non-negative.")
+        if self.validation_metric not in {"mse", "rmse"}:
+            raise ValueError("validation_metric must be 'mse' or 'rmse'.")
         if self.min_delta < 0:
             raise ValueError("min_delta must be non-negative.")
         if self.weight_decay < 0:
@@ -128,7 +146,7 @@ class BRITSNetwork(nn.Module):
         self.backward_rits = RITS(n_features, hidden_size)
         self.consistency_weight = consistency_weight
 
-    def forward(self, values, masks):
+    def forward(self, values, masks, return_components=False):
         forward, forward_loss = self.forward_rits(values, masks, _deltas(masks))
 
         reverse_values = torch.flip(values, (1,))
@@ -141,8 +159,12 @@ class BRITSNetwork(nn.Module):
         backward = torch.flip(backward, (1,))
 
         consistency = torch.mean(torch.abs(forward - backward))
-        loss = forward_loss + backward_loss + self.consistency_weight * consistency
-        return (forward + backward) / 2, loss
+        reconstruction = forward_loss + backward_loss
+        loss = reconstruction + self.consistency_weight * consistency
+        imputation = (forward + backward) / 2
+        if return_components:
+            return imputation, loss, reconstruction, consistency
+        return imputation, loss
 
 
 def _masked_mae(prediction, target, mask):
@@ -174,13 +196,67 @@ class _BRITSBackend:
         self.training_history = []
         self.best_epoch = None
 
+    def _mixed_missing_mask(self, values, random_state):
+        """Sample one evaluation-style missingness scenario per segment."""
+
+        generator = np.random.default_rng(random_state)
+        segment_count, sequence_length, feature_count = values.shape
+        available_scenarios = [
+            scenario
+            for scenario in MISSING_SCENARIOS
+            if BLOCK_LENGTHS.get(scenario, 1) <= sequence_length
+        ]
+        scenarios = generator.choice(available_scenarios, size=segment_count)
+        hidden = np.zeros(values.shape, dtype=bool)
+        for segment, scenario in enumerate(scenarios):
+            feature = generator.integers(feature_count)
+            if scenario == "Single":
+                step = generator.integers(sequence_length)
+                hidden[segment, step, feature] = True
+            elif scenario in BLOCK_LENGTHS:
+                length = BLOCK_LENGTHS[scenario]
+                start = generator.integers(sequence_length - length + 1)
+                hidden[segment, start : start + length, feature] = True
+            else:
+                hidden[segment, :, feature] = True
+        return hidden
+
+    def _training_masks(self, train_set, truth, epoch):
+        finite_truth = np.isfinite(truth)
+        input_observed = np.isfinite(np.asarray(train_set["X"])) & finite_truth
+        predefined = train_set.get("indicating_mask")
+        if predefined is not None:
+            hidden = np.asarray(predefined, dtype=bool) & finite_truth
+        elif self.config.masking_strategy == "mixed":
+            hidden = self._mixed_missing_mask(
+                truth, random_state=self.config.seed + epoch
+            )
+            hidden &= input_observed
+        elif self.config.masking_strategy == "random":
+            generator = np.random.default_rng(self.config.seed + epoch)
+            hidden = (
+                generator.random(truth.shape) < self.config.masking_rate
+            ) & input_observed
+        else:
+            hidden = np.zeros(truth.shape, dtype=bool)
+
+        if (
+            self.config.masking_strategy != "none"
+            and predefined is None
+            and not np.any(hidden)
+            and np.any(input_observed)
+        ):
+            generator = np.random.default_rng(self.config.seed + epoch)
+            hidden.flat[generator.choice(np.flatnonzero(input_observed))] = True
+        observed = input_observed & ~hidden
+        return observed, hidden
+
     def fit(self, train_set, val_set=None):
-        values = np.asarray(train_set["X"], dtype=np.float32)
-        loader = DataLoader(
-            TensorDataset(torch.from_numpy(values)),
-            batch_size=self.config.batch_size,
-            shuffle=True,
+        truth = np.asarray(
+            train_set.get("X_intact", train_set["X"]), dtype=np.float32
         )
+        if not np.any(np.isfinite(truth) & np.isfinite(train_set["X"])):
+            raise ValueError("BRITS training data has no observed values.")
         optimizer = torch.optim.Adam(
             self.network.parameters(),
             lr=self.config.learning_rate,
@@ -195,30 +271,65 @@ class _BRITSBackend:
         epochs_without_improvement = 0
         training_started = time.perf_counter()
         for epoch in range(self.config.epochs):
+            observed, hidden = self._training_masks(train_set, truth, epoch)
+            inputs = np.where(observed, truth, 0).astype(np.float32)
+            targets = np.where(np.isfinite(truth), truth, 0).astype(np.float32)
+            loader = DataLoader(
+                TensorDataset(
+                    torch.from_numpy(inputs),
+                    torch.from_numpy(targets),
+                    torch.from_numpy(observed.astype(np.float32)),
+                    torch.from_numpy(hidden.astype(np.float32)),
+                ),
+                batch_size=self.config.batch_size,
+                shuffle=True,
+            )
             self.network.train()
             epoch_loss = 0.0
-            for (batch,) in loader:
+            reconstruction_total = 0.0
+            consistency_total = 0.0
+            mit_total = 0.0
+            for batch, batch_truth, masks, batch_hidden in loader:
                 batch = batch.to(self.device)
-                masks = torch.isfinite(batch).float()
-                batch = torch.nan_to_num(batch)
-                _, loss = self.network(batch, masks)
+                batch_truth = batch_truth.to(self.device)
+                masks = masks.to(self.device)
+                batch_hidden = batch_hidden.to(self.device)
+                imputation, brits_loss, reconstruction, consistency = self.network(
+                    batch, masks, return_components=True
+                )
+                mit = _masked_mae(imputation, batch_truth, batch_hidden)
+                loss = brits_loss + self.config.mit_weight * mit
                 optimizer.zero_grad()
                 loss.backward()
+                if self.config.gradient_clip > 0:
+                    nn.utils.clip_grad_norm_(
+                        self.network.parameters(), self.config.gradient_clip
+                    )
                 optimizer.step()
                 epoch_loss += loss.item()
+                reconstruction_total += reconstruction.item()
+                consistency_total += consistency.item()
+                mit_total += mit.item()
 
             mean_loss = epoch_loss / len(loader)
             validation = self._validation_metrics(val_set) if val_set is not None else None
             validation_mse = None if validation is None else validation["mse"]
             validation_rmse = None if validation is None else validation["rmse"]
-            # PyPOTS uses MSE as BRITS' default validation metric. For a
-            # multi-scenario monitor we use the unweighted mean scenario MSE.
-            score = validation_mse if validation_mse is not None else mean_loss
+            # GeoLink reports RMSE, so checkpoint selection uses the same
+            # metric by default. MSE remains available for PyPOTS parity.
+            score = (
+                validation[self.config.validation_metric]
+                if validation is not None
+                else mean_loss
+            )
             if not np.isfinite(score):
                 raise RuntimeError(f"BRITS produced a non-finite selection score at epoch {epoch + 1}.")
             history_point = {
                 "epoch": epoch + 1,
                 "loss": mean_loss,
+                "reconstruction_loss": reconstruction_total / len(loader),
+                "consistency_loss": consistency_total / len(loader),
+                "mit_loss": mit_total / len(loader),
                 "validation_mse": validation_mse,
                 "validation_rmse": validation_rmse,
             }
