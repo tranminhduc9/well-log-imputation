@@ -154,7 +154,8 @@ def load_and_check_data(data_root, evaluate_test):
     return preprocessing, datasets, metadata, fingerprints
 
 
-def evaluate_details(model, datasets, metadata, preprocessing, model_name, seed, split):
+def evaluate_details(model, datasets, metadata, preprocessing, model_name, seed, split,
+                     *, include_well_log=False):
     """Evaluate one prediction pass per scenario, including per-log/per-well rows.
 
     Pooled/within-well errors are normalized. Per-log errors are additionally
@@ -191,6 +192,13 @@ def evaluate_details(model, datasets, metadata, preprocessing, model_name, seed,
         for well in metadata["WELL"].unique():
             selected = (metadata["WELL"] == well).to_numpy()
             record(truth[selected], prediction[selected], mask[selected], "well", well, "normalized")
+            if include_well_log:
+                for index, log in enumerate(preprocessing["log_columns"]):
+                    start = len(rows)
+                    record(truth[selected, :, index], prediction[selected, :, index],
+                           mask[selected, :, index], "well_log", f"{well}::{log}", "normalized")
+                    if len(rows) > start:
+                        rows[-1].update(well=str(well), log=log)
     return rows
 
 
@@ -232,7 +240,8 @@ def capture_provenance(project_root, output_dir):
         except PackageNotFoundError:
             packages[name] = None
     files = list((project_root / "src").rglob("*.py"))
-    files += [project_root / "notebook" / "geo_link.ipynb", project_root / "requirements.txt"]
+    files += [project_root / "notebook" / "geo_link.ipynb",
+              project_root / "notebook" / "m_saits.ipynb", project_root / "requirements.txt"]
     hashes = {}
     for source in files:
         if source.is_file():

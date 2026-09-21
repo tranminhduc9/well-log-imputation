@@ -16,9 +16,10 @@ the latent width and ConvFFN expansion used by this implementation.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import logging
 import math
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -60,9 +61,19 @@ class MSAITSConfig(ModelConfig):
     mit_weight: float = 1.0
     mit_reduction: str = "segment"
     min_delta: float = 1e-4
+    temporal_residual: bool = False
+    encoder_norm: str = "batch"
+    gap_aware_gate: bool = False
+    decoder: str = "shared"
+    decoder_width: int = 32
+    independent_shuffle: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.encoder_norm not in {"batch", "layer"}:
+            raise ValueError("encoder_norm must be 'batch' or 'layer'.")
+        if self.decoder not in {"shared", "per_log"} or self.decoder_width <= 0:
+            raise ValueError("Invalid decoder or decoder_width.")
         if self.mit_reduction not in {"segment", "point"}:
             raise ValueError("mit_reduction must be 'segment' or 'point'.")
         positive = {
@@ -113,6 +124,7 @@ class DecoupledFeatureEncoder(nn.Module):
         super().__init__()
         self.n_features = config.n_features
         self.channels = config.encoder_channels
+        self.temporal_residual = config.temporal_residual
         total_channels = self.n_features * self.channels
 
         # A shared per-variable projection keeps variables decoupled at H0.
@@ -124,7 +136,10 @@ class DecoupledFeatureEncoder(nn.Module):
             padding=config.kernel_size // 2,
             groups=total_channels,
         )
-        self.temporal_norm = nn.BatchNorm1d(total_channels)
+        self.temporal_norm = (
+            nn.BatchNorm1d(total_channels) if config.encoder_norm == "batch"
+            else _ChannelLayerNorm(total_channels)
+        )
 
         channel_hidden = self.n_features * self.channels * config.conv_expansion
         self.channel_ffn = nn.Sequential(
@@ -173,7 +188,8 @@ class DecoupledFeatureEncoder(nn.Module):
         # H0: (B, T, M, C), then flatten independent M/C pairs for Conv1d.
         hidden = self.input_projection(torch.stack((values, observed), dim=-1))
         hidden = hidden.permute(0, 2, 3, 1).reshape(batch, -1, steps)
-        hidden = self.temporal_norm(self.temporal(hidden))
+        temporal = self.temporal_norm(self.temporal(hidden))
+        hidden = hidden + temporal if self.temporal_residual else temporal
         hidden = hidden + F.gelu(self.channel_ffn(hidden))
 
         # ConvFFN2 needs channels ordered as (latent channel, variable) so each
@@ -184,6 +200,49 @@ class DecoupledFeatureEncoder(nn.Module):
         hidden = hidden.reshape(batch, self.channels, self.n_features, steps)
         hidden = hidden.permute(0, 3, 2, 1).reshape(batch, steps, -1)
         return self.output_projection(hidden)
+
+
+class _ChannelLayerNorm(nn.Module):
+    """Normalize latent channels at each sample, never across depth/batch."""
+
+    def __init__(self, channels):
+        super().__init__()
+        self.norm = nn.LayerNorm(channels)
+
+    def forward(self, values):
+        return self.norm(values.transpose(1, 2)).transpose(1, 2)
+
+
+def gap_features(observed):
+    """Mask-only features: index distances, availability, coverage, entire gap.
+
+    Distances are sample-index distances / T, NOT physical depth. Missing-side
+    distances use 1 plus an explicit availability flag, including Entire-Log.
+    """
+    _, steps, _ = observed.shape
+    index = torch.arange(steps, device=observed.device).view(1, steps, 1)
+    valid = observed.bool()
+    left = torch.where(valid, index, -1).cummax(dim=1).values
+    right = torch.where(valid, index, steps).flip(1).cummin(dim=1).values.flip(1)
+    has_left, has_right = left >= 0, right < steps
+    left_distance = torch.where(has_left, (index - left) / steps, 1.)
+    right_distance = torch.where(has_right, (right - index) / steps, 1.)
+    coverage = observed.mean(1, keepdim=True).expand_as(observed)
+    return torch.cat((left_distance, right_distance, has_left.to(observed.dtype),
+                      has_right.to(observed.dtype), coverage, (coverage == 0).to(observed.dtype)), -1)
+
+
+class _PerLogDecoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.heads = nn.ModuleList(
+            nn.Sequential(nn.Linear(config.d_model, config.decoder_width), nn.ReLU(),
+                          nn.Linear(config.decoder_width, 1))
+            for _ in range(config.n_features)
+        )
+
+    def forward(self, hidden):
+        return torch.cat([head(hidden) for head in self.heads], -1)
 
 
 class DiagonallyMaskedAttentionLayer(nn.Module):
@@ -280,9 +339,12 @@ class MSAITSNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(config.n_features, config.n_features),
         )
+        if config.decoder == "per_log":
+            self.second_output = _PerLogDecoder(config)
         # At each time step: observed mask (M) + attention row (T) -> eta (M).
         self.gate = nn.Linear(
-            config.n_features + config.seq_len, config.n_features
+            config.n_features + config.seq_len + (6 * config.n_features if config.gap_aware_gate else 0),
+            config.n_features
         )
 
     def _attention_block(
@@ -323,7 +385,10 @@ class MSAITSNetwork(nn.Module):
         estimate_second = self.second_output(second_hidden)
 
         mean_attention = attention.mean(dim=1)
-        eta = torch.sigmoid(self.gate(torch.cat((observed, mean_attention), -1)))
+        gate_input = [observed, mean_attention]
+        if self.config.gap_aware_gate:
+            gate_input.append(gap_features(observed))
+        eta = torch.sigmoid(self.gate(torch.cat(gate_input, -1)))
         estimate = (1 - eta) * estimate_first + eta * estimate_second
         imputation = observed * values + (1 - observed) * estimate
         return imputation, estimate_first, estimate_second, estimate, attention
@@ -350,6 +415,9 @@ class _MSAITSBackend:
         self.network = MSAITSNetwork(config).to(self.device)
         self.training_history: list[dict[str, float | int]] = []
         self.best_epoch: int | None = None
+        # Opt-in study hooks; old callers and checkpoint architecture unchanged.
+        self.training_checkpoint: Path | None = None
+        self.epoch_callback = None
 
     def _training_masks(
         self,
@@ -399,8 +467,25 @@ class _MSAITSBackend:
         stale_epochs = 0
         self.training_history = []
         self.best_epoch = None
+        start_epoch = 0
+        stopped = False
+        checkpoint = self.training_checkpoint
+        if checkpoint is not None and checkpoint.is_file():
+            saved = torch.load(checkpoint, map_location=self.device, weights_only=False)
+            if saved["config"] != asdict(self.config):
+                raise ValueError("Cannot resume M-SAITS with a changed configuration.")
+            self.network.load_state_dict(saved["state_dict"])
+            optimizer.load_state_dict(saved["optimizer"])
+            best_state, best_score = saved["best_state"], saved["best_score"]
+            patience_score, stale_epochs = saved["patience_score"], saved["stale_epochs"]
+            self.training_history, self.best_epoch = saved["history"], saved["best_epoch"]
+            start_epoch, stopped = saved["epoch"], saved["stopped"]
+            torch.set_rng_state(saved["torch_rng"].cpu())
+            if self.device.type == "cuda":
+                torch.cuda.set_rng_state_all([state.cpu() for state in saved["cuda_rng"]])
+            LOGGER.info("Resuming M-SAITS after epoch %d", start_epoch)
 
-        for epoch in range(self.config.epochs):
+        for epoch in range(start_epoch, self.config.epochs) if not stopped else ():
             observed, hidden = self._training_masks(train_set, truth, epoch)
             if not np.any(hidden):
                 raise ValueError(
@@ -417,6 +502,8 @@ class _MSAITSBackend:
                 ),
                 batch_size=self.config.batch_size,
                 shuffle=True,
+                generator=(torch.Generator().manual_seed(self.config.seed + epoch)
+                           if self.config.independent_shuffle else None),
             )
 
             self.network.train()
@@ -493,7 +580,25 @@ class _MSAITSBackend:
                         epoch + 1,
                         self.best_epoch,
                     )
-                    break
+                    stopped = True
+
+            if checkpoint is not None:
+                checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                temporary = checkpoint.with_suffix(".tmp")
+                torch.save({
+                    "config": asdict(self.config), "epoch": epoch + 1,
+                    "state_dict": self.network.state_dict(), "optimizer": optimizer.state_dict(),
+                    "best_state": best_state, "best_score": best_score,
+                    "patience_score": patience_score, "stale_epochs": stale_epochs,
+                    "history": self.training_history, "best_epoch": self.best_epoch,
+                    "stopped": stopped, "torch_rng": torch.get_rng_state(),
+                    "cuda_rng": torch.cuda.get_rng_state_all() if self.device.type == "cuda" else [],
+                }, temporary)
+                temporary.replace(checkpoint)
+            if self.epoch_callback is not None:
+                self.epoch_callback(self.training_history[-1])
+            if stopped:
+                break
 
         if best_state is not None:
             self.network.load_state_dict(best_state)
