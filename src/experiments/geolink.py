@@ -125,9 +125,18 @@ def load_and_check_data(data_root, evaluate_test):
             if overlap:
                 raise ValueError(f"Well leakage between {other} and {split}: {sorted(overlap)}")
         metadata[split] = meta
+        depth = None
+        if {"START_DEPTH", "END_DEPTH"} <= set(meta.columns):
+            endpoints = meta[["START_DEPTH", "END_DEPTH"]].to_numpy(dtype=np.float64)
+            if not np.isfinite(endpoints).all() or np.any(endpoints[:, 1] <= endpoints[:, 0]):
+                raise ValueError(f"Invalid depth metadata in {split}.")
+            fractions = np.linspace(0.0, 1.0, steps, dtype=np.float64)
+            depth = (endpoints[:, :1] + (endpoints[:, 1:] - endpoints[:, :1]) * fractions).astype(np.float32)
         files.extend([value_path, meta_path])
         if split == "train":
             datasets[split] = {"X": values}
+            if depth is not None:
+                datasets[split]["depth"] = depth
             continue
         datasets[split] = {}
         for scenario in scenarios:
@@ -149,6 +158,8 @@ def load_and_check_data(data_root, evaluate_test):
             datasets[split][scenario] = {
                 "X": masked, "X_intact": values, "indicating_mask": mask,
             }
+            if depth is not None:
+                datasets[split][scenario]["depth"] = depth
             files.append(mask_path)
     fingerprints = {str(path.relative_to(root)): sha256(path) for path in files}
     return preprocessing, datasets, metadata, fingerprints
@@ -165,7 +176,10 @@ def evaluate_details(model, datasets, metadata, preprocessing, model_name, seed,
     for scenario, dataset in datasets.items():
         truth, mask = dataset["X_intact"], dataset["indicating_mask"]
         # Do not expose targets to the prediction backend.
-        prediction = model.impute({"X": dataset["X"]})
+        model_input = {"X": dataset["X"]}
+        if "depth" in dataset:
+            model_input["depth"] = dataset["depth"]
+        prediction = model.impute(model_input)
         if not np.isfinite(prediction).all():
             raise ValueError(f"{model_name}/{seed}/{split}/{scenario}: non-finite prediction.")
         if not np.allclose(prediction[~mask], dataset["X"][~mask], rtol=1e-6, atol=1e-7):

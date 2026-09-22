@@ -51,6 +51,8 @@ class MSAITSConfig(ModelConfig):
     n_heads: int = 4
     encoder_channels: int = 16
     kernel_size: int = 51
+    multi_scale_conv: bool = False
+    multi_scale_kernels: tuple[int, ...] = (3, 7, 15)
     conv_expansion: int = 2
     dropout: float = 0.1
     attn_dropout: float = 0.1
@@ -67,6 +69,9 @@ class MSAITSConfig(ModelConfig):
     decoder: str = "shared"
     decoder_width: int = 32
     independent_shuffle: bool = False
+    depth_encoding: bool = False
+    depth_mean: float = 0.0
+    depth_std: float = 1.0
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -97,6 +102,14 @@ class MSAITSConfig(ModelConfig):
             raise ValueError("d_model must be even for sinusoidal positional encoding.")
         if self.kernel_size % 2 == 0:
             raise ValueError("kernel_size must be odd to preserve sequence length.")
+        kernels = tuple(self.multi_scale_kernels)
+        object.__setattr__(self, "multi_scale_kernels", kernels)
+        if not kernels or len(set(kernels)) != len(kernels):
+            raise ValueError("multi_scale_kernels must contain unique values.")
+        if any(type(value) is not int or value <= 0 or value % 2 == 0 for value in kernels):
+            raise ValueError("multi_scale_kernels must be positive odd integers.")
+        if not math.isfinite(self.depth_mean) or not math.isfinite(self.depth_std) or self.depth_std <= 0:
+            raise ValueError("Depth normalization must be finite with depth_std > 0.")
         if self.diagonal_attention_mask and self.seq_len < 2:
             raise ValueError("Diagonal attention requires at least two time steps.")
         if not 0 <= self.dropout < 1 or not 0 <= self.attn_dropout < 1:
@@ -124,18 +137,36 @@ class DecoupledFeatureEncoder(nn.Module):
         super().__init__()
         self.n_features = config.n_features
         self.channels = config.encoder_channels
+        self.total_channels = self.n_features * self.channels
         self.temporal_residual = config.temporal_residual
-        total_channels = self.n_features * self.channels
+        total_channels = self.total_channels
 
         # A shared per-variable projection keeps variables decoupled at H0.
         self.input_projection = nn.Linear(2, self.channels)
-        self.temporal = nn.Conv1d(
-            total_channels,
-            total_channels,
-            kernel_size=config.kernel_size,
-            padding=config.kernel_size // 2,
-            groups=total_channels,
-        )
+        self.temporal = None
+        self.temporal_branches = None
+        self.temporal_fusion = None
+        if config.multi_scale_conv:
+            kernels = tuple(config.multi_scale_kernels)
+            self.temporal_branches = nn.ModuleList(
+                nn.Conv1d(total_channels, total_channels, kernel_size=kernel,
+                          padding=kernel // 2, groups=total_channels)
+                for kernel in kernels
+            )
+            # Stack as (B, channel, scale, time), so each grouped 1x1 filter
+            # combines scales for one latent channel without mixing variables.
+            self.temporal_fusion = nn.Conv1d(
+                total_channels * len(kernels), total_channels, kernel_size=1,
+                groups=total_channels,
+            )
+        else:
+            self.temporal = nn.Conv1d(
+                total_channels,
+                total_channels,
+                kernel_size=config.kernel_size,
+                padding=config.kernel_size // 2,
+                groups=total_channels,
+            )
         self.temporal_norm = (
             nn.BatchNorm1d(total_channels) if config.encoder_norm == "batch"
             else _ChannelLayerNorm(total_channels)
@@ -188,7 +219,14 @@ class DecoupledFeatureEncoder(nn.Module):
         # H0: (B, T, M, C), then flatten independent M/C pairs for Conv1d.
         hidden = self.input_projection(torch.stack((values, observed), dim=-1))
         hidden = hidden.permute(0, 2, 3, 1).reshape(batch, -1, steps)
-        temporal = self.temporal_norm(self.temporal(hidden))
+        if self.temporal_branches is not None:
+            temporal = torch.stack(
+                [branch(hidden) for branch in self.temporal_branches], dim=2
+            ).reshape(batch, self.total_channels * len(self.temporal_branches), steps)
+            temporal = self.temporal_fusion(temporal)
+        else:
+            temporal = self.temporal(hidden)
+        temporal = self.temporal_norm(temporal)
         hidden = hidden + temporal if self.temporal_residual else temporal
         hidden = hidden + F.gelu(self.channel_ffn(hidden))
 
@@ -322,6 +360,10 @@ class MSAITSNetwork(nn.Module):
             config.d_model + config.n_features, config.d_model
         )
         self.embedding_dropout = nn.Dropout(config.dropout)
+        self.depth_projection = (
+            nn.Sequential(nn.Linear(1, config.d_model), nn.Tanh())
+            if config.depth_encoding else None
+        )
         self.register_buffer(
             "position", _sinusoidal_position(config.seq_len, config.d_model)
         )
@@ -365,11 +407,20 @@ class MSAITSNetwork(nn.Module):
         self,
         values: torch.Tensor,
         observed: torch.Tensor,
+        depth: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         encoded = self.encoder(values, observed)
+        position = self.position
+        if self.depth_projection is not None:
+            if depth is None:
+                raise ValueError("depth is required when depth_encoding=True.")
+            if depth.shape != values.shape[:2] or not torch.isfinite(depth).all():
+                raise ValueError("depth must be finite with shape (batch, steps).")
+            normalized_depth = (depth - self.config.depth_mean) / self.config.depth_std
+            position = position + self.depth_projection(normalized_depth.unsqueeze(-1))
 
         first_hidden = self.embedding_dropout(
-            self.first_embedding(encoded) + self.position
+            self.first_embedding(encoded) + position
         )
         first_hidden, _ = self._attention_block(first_hidden, self.first_block)
         estimate_first = self.first_output(first_hidden)
@@ -377,7 +428,7 @@ class MSAITSNetwork(nn.Module):
         filled = observed * values + (1 - observed) * estimate_first
         second_hidden = self.embedding_dropout(
             self.second_embedding(torch.cat((filled, encoded), dim=-1))
-            + self.position
+            + position
         )
         second_hidden, attention = self._attention_block(
             second_hidden, self.second_block
@@ -493,12 +544,22 @@ class _MSAITSBackend:
                 )
             inputs = np.where(observed, truth, 0).astype(np.float32)
             targets = np.where(np.isfinite(truth), truth, 0).astype(np.float32)
+            depth = train_set.get("depth")
+            if self.config.depth_encoding:
+                if depth is None:
+                    raise ValueError("Training data needs depth when depth_encoding=True.")
+                depth = np.asarray(depth, dtype=np.float32)
+                if depth.shape != truth.shape[:2] or not np.isfinite(depth).all():
+                    raise ValueError("Training depth must be finite and aligned with X.")
+            else:
+                depth = np.zeros(truth.shape[:2], dtype=np.float32)
             loader = DataLoader(
                 TensorDataset(
                     torch.from_numpy(inputs),
                     torch.from_numpy(targets),
                     torch.from_numpy(observed.astype(np.float32)),
                     torch.from_numpy(hidden.astype(np.float32)),
+                    torch.from_numpy(depth),
                 ),
                 batch_size=self.config.batch_size,
                 shuffle=True,
@@ -510,13 +571,14 @@ class _MSAITSBackend:
             loss_total = 0.0
             ort_total = 0.0
             mit_total = 0.0
-            for batch_inputs, batch_truth, batch_observed, batch_hidden in loader:
+            for batch_inputs, batch_truth, batch_observed, batch_hidden, batch_depth in loader:
                 batch_inputs = batch_inputs.to(self.device)
                 batch_truth = batch_truth.to(self.device)
                 batch_observed = batch_observed.to(self.device)
                 batch_hidden = batch_hidden.to(self.device)
+                batch_depth = batch_depth.to(self.device)
                 _, first, second, combined, _ = self.network(
-                    batch_inputs, batch_observed
+                    batch_inputs, batch_observed, batch_depth
                 )
                 ort = sum(
                     _masked_mae(part, batch_truth, batch_observed)
@@ -640,7 +702,9 @@ class _MSAITSBackend:
         with torch.no_grad():
             for start in range(0, len(values), self.config.batch_size):
                 end = start + self.config.batch_size
-                prediction = self._predict_batch(values[start:end])
+                depth = dataset.get("depth")
+                batch_depth = None if depth is None else np.asarray(depth)[start:end]
+                prediction = self._predict_batch(values[start:end], batch_depth)
                 valid = mask[start:end] & np.isfinite(truth[start:end])
                 difference = prediction[valid] - truth[start:end][valid]
                 error_sum += float(np.square(difference.astype(np.float64)).sum())
@@ -649,22 +713,35 @@ class _MSAITSBackend:
             raise ValueError("M-SAITS validation has no masked values to score.")
         return math.sqrt(error_sum / count)
 
-    def _predict_batch(self, values: np.ndarray) -> np.ndarray:
+    def _predict_batch(self, values: np.ndarray, depth: np.ndarray | None = None) -> np.ndarray:
         batch = torch.as_tensor(values, dtype=torch.float32, device=self.device)
         observed = torch.isfinite(batch).float()
         clean = torch.nan_to_num(batch, nan=0.0, posinf=0.0, neginf=0.0)
-        imputation, _, _, _, _ = self.network(clean, observed)
+        batch_depth = None
+        if depth is not None:
+            batch_depth = torch.as_tensor(depth, dtype=torch.float32, device=self.device)
+        imputation, _, _, _, _ = self.network(clean, observed, batch_depth)
         return imputation.cpu().numpy()
 
     def predict(self, dataset: dict[str, Any]) -> dict[str, np.ndarray]:
         values = np.asarray(dataset["X"], dtype=np.float32)
+        depth = dataset.get("depth")
+        if self.config.depth_encoding:
+            if depth is None:
+                raise ValueError("Prediction data needs depth when depth_encoding=True.")
+            depth = np.asarray(depth, dtype=np.float32)
+            if depth.shape != values.shape[:2] or not np.isfinite(depth).all():
+                raise ValueError("Prediction depth must be finite and aligned with X.")
         if len(values) == 0:
             return {"imputation": values.copy()}
         self.network.eval()
         with torch.no_grad():
             imputation = np.concatenate(
                 [
-                    self._predict_batch(values[start : start + self.config.batch_size])
+                    self._predict_batch(
+                        values[start : start + self.config.batch_size],
+                        None if depth is None else depth[start : start + self.config.batch_size],
+                    )
                     for start in range(0, len(values), self.config.batch_size)
                 ]
             )

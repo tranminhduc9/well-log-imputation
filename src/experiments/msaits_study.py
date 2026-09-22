@@ -10,6 +10,7 @@ from pathlib import Path
 import gc
 import json
 import logging
+import math
 import re
 import shutil
 import time
@@ -39,6 +40,11 @@ COMPONENTS = {
     "layernorm": {"encoder_norm": "layer"},
     "gap_gate": {"gap_aware_gate": True},
     "per_log_head": {"decoder": "per_log", "decoder_width": 32},
+    "multi_scale_conv": {
+        "multi_scale_conv": True,
+        "multi_scale_kernels": (3, 7, 15),
+    },
+    "depth_encoding": {"depth_encoding": True},
 }
 
 
@@ -70,6 +76,25 @@ def component_candidates(reference, components):
     return candidates
 
 
+def compact_component_candidates(reference, components):
+    """Baseline, one-component additions, and one combined model.
+
+    Unlike the full factorial-style ablation, this avoids duplicate leave-one-out
+    arms. With two components it produces four configurations, which keeps the
+    two-seed Kaggle run comfortably below the session limit.
+    """
+    if not components or len(set(components)) != len(components) or set(components) - COMPONENTS.keys():
+        raise ValueError("Select unique supported components.")
+    candidates = [("reference", dict(reference))]
+    candidates += [(f"add_{name}", {**reference, **COMPONENTS[name]}) for name in components]
+    if len(components) > 1:
+        combined = dict(reference)
+        for name in components:
+            combined.update(COMPONENTS[name])
+        candidates.append(("full", combined))
+    return candidates
+
+
 def score_seeds(rows):
     frame = pd.DataFrame(rows)
     frame = frame[(frame["level"] == "overall") & (frame["split"] == "val")]
@@ -96,6 +121,14 @@ class MSAITSStudy:
             self.device = "cpu"
         set_seed(seeds[0])
         self.preprocessing, self.data, self.metadata, hashes = load_and_check_data(self.data_root, False)
+        train_depth = self.data["train"].get("depth")
+        if train_depth is None:
+            self.depth_mean, self.depth_std = 0.0, 1.0
+        else:
+            self.depth_mean = float(np.mean(train_depth, dtype=np.float64))
+            self.depth_std = float(np.std(train_depth, dtype=np.float64))
+            if not math.isfinite(self.depth_std) or self.depth_std <= 0:
+                raise ValueError("Training depths need positive finite variation.")
         self.seeds, self.epochs, self.patience = tuple(seeds), epochs, patience
         protocol = dict(seeds=list(seeds), epochs=epochs, patience=patience, device=self.device,
                         data_sha256=hashes, source_sha256={
@@ -117,7 +150,9 @@ class MSAITSStudy:
                 selection="Mean of four validation scenario RMSEs per seed; average all requested seeds.",
                 test_role="Development split, not an untouched holdout. Never used for study ranking.",
                 resume="Latest completed epoch including optimizer, best weights and Torch RNG; same environment required.",
-                gap_features="Distances in sample indices, NOT physical depth; no interpolation.",
+                gap_features="Mask-derived distances use sample indices.",
+                depth_encoding=("START_DEPTH/END_DEPTH are linearly expanded per segment "
+                                "and normalized using train only."),
                 provenance=capture_provenance(self.project_root, self.output_dir))
             save_json(self.output_dir / "preprocessing_parameters.json", self.preprocessing)
             self._save()
@@ -127,12 +162,16 @@ class MSAITSStudy:
         save_json(self.output_dir / "study.json", self.manifest)
 
     def _config(self, settings, seed, folder):
-        forbidden = {"seq_len", "n_features", "epochs", "patience", "device", "seed", "output_dir", "optimizer"}
+        forbidden = {"seq_len", "n_features", "epochs", "patience", "device", "seed",
+                     "output_dir", "optimizer", "depth_mean", "depth_std"}
         if forbidden & settings.keys():
             raise ValueError(f"Use the study protocol for {sorted(forbidden & settings.keys())}")
+        if settings.get("depth_encoding") and "depth" not in self.data["train"]:
+            raise ValueError("depth_encoding requires START_DEPTH and END_DEPTH metadata.")
         return MSAITSConfig(**settings, seq_len=self.preprocessing["segment_length"],
             n_features=len(self.preprocessing["log_columns"]), epochs=self.epochs,
-            patience=self.patience, device=self.device, seed=seed, output_dir=folder)
+            patience=self.patience, device=self.device, seed=seed, output_dir=folder,
+            depth_mean=self.depth_mean, depth_std=self.depth_std)
 
     def run_stage(self, stage, candidates):
         if not re.fullmatch(r"[a-z0-9_]+", stage) or not candidates:
@@ -278,6 +317,12 @@ class MSAITSStudy:
             pairs += [("full", v, "removal") for v in variants if v.startswith("without_")]
             if "full" in variants:
                 pairs.append(("full", "reference", "combined"))
+                # Compact ablations omit duplicate leave-one-out arms. These
+                # comparisons recover each component's incremental effect when
+                # the other selected component is already enabled.
+                if not any(v.startswith("without_") for v in variants):
+                    pairs += [("full", v, "incremental")
+                              for v in variants if v.startswith("add_")]
             for candidate, control, kind in pairs:
                 if control not in variants:
                     continue
