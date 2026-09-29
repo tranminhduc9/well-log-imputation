@@ -31,6 +31,7 @@ from src.data.metrics import compute_imputation_metrics
 from src.models.locf import LOCF
 from src.models.model import ModelConfig
 from src.models.saits import SAITS, SAITSConfig
+from src.models.brits import BRITS, BRITSConfig
 from src.models.xgboost import XGBoost, XGBoostConfig
 from src.models.geo_blend import GeoBlend, GeoBlendConfig
 from src.models._geoblend.trees import GeoBoost, GeoBoostConfig
@@ -40,10 +41,10 @@ from src.preprocessing.pipeline import MISSING_SCENARIOS, BLOCK_LENGTHS
 
 
 LOGGER = logging.getLogger(__name__)
-MODEL_CLASSES = {"locf": LOCF, "xgboost": XGBoost, "saits": SAITS, "geo_blend": GeoBlend}
+MODEL_CLASSES = {"locf": LOCF, "xgboost": XGBoost, "saits": SAITS, "brits": BRITS, "geo_blend": GeoBlend}
 CONFIG_CLASSES = {"locf": ModelConfig, "xgboost": XGBoostConfig,
-                  "saits": SAITSConfig, "geo_blend": GeoBlendConfig}
-LABELS = {"locf": "LOCF", "xgboost": "XGBoost", "saits": "SAITS (segment MIT)",
+                  "saits": SAITSConfig, "brits": BRITSConfig, "geo_blend": GeoBlendConfig}
+LABELS = {"brits": "BRITS (segment MIT)", "locf": "LOCF", "xgboost": "XGBoost", "saits": "SAITS (segment MIT)",
           "geo_blend": "GeoBlend (SAITS + tree + temporal ensemble)"}
 DEPENDENCIES = {"geo_blend": ("saits",)}
 # Only checkpoint compatibility uses these names; users cannot select them as models.
@@ -282,7 +283,7 @@ def make_config(name, common, settings, seed, args, artifact_dir):
     if name == "xgboost":
         parameters.update(n_estimators=args.xgb_estimators,
                           device="cuda" if torch.cuda.is_available() else "cpu")
-    elif name == "saits":
+    elif name in {"saits", "brits"}:
         parameters.update(epochs=args.saits_epochs, patience=args.saits_patience,
                           device="gpu" if torch.cuda.is_available() else "cpu")
     elif name == "geo_blend":
