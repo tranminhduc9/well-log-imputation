@@ -28,35 +28,26 @@ import pandas as pd
 import torch
 
 from src.data.metrics import compute_imputation_metrics
-from src.models.brits import BRITS, BRITSConfig
 from src.models.locf import LOCF
 from src.models.model import ModelConfig
 from src.models.saits import SAITS, SAITSConfig
-from src.models.m_saits import MSAITS, MSAITSConfig
 from src.models.xgboost import XGBoost, XGBoostConfig
-from src.models.geoboost import GeoBoost, GeoBoostConfig
-from src.models.geo_tcn import GeoTCN, GeoTCNConfig
-from src.models.linear import Linear
-from src.models.geo_blend import GeoBlend
-from src.models.saits_boost import SAITSBoost, SAITSBoostConfig
+from src.models.geo_blend import GeoBlend, GeoBlendConfig
+from src.models._geoblend.trees import GeoBoost, GeoBoostConfig
+from src.models._geoblend.temporal import GeoTCN, GeoTCNConfig
 from src.experiments.comparison import write_comparison
 from src.preprocessing.pipeline import MISSING_SCENARIOS, BLOCK_LENGTHS
 
 
 LOGGER = logging.getLogger(__name__)
-MODEL_CLASSES = {"locf": LOCF, "xgboost": XGBoost, "brits": BRITS,
-                 "saits": SAITS, "m_saits": MSAITS, "geoboost": GeoBoost, "geo_tcn": GeoTCN,
-                 "linear": Linear, "geo_blend": GeoBlend, "saits_boost": SAITSBoost}
+MODEL_CLASSES = {"locf": LOCF, "xgboost": XGBoost, "saits": SAITS, "geo_blend": GeoBlend}
 CONFIG_CLASSES = {"locf": ModelConfig, "xgboost": XGBoostConfig,
-                  "brits": BRITSConfig, "saits": SAITSConfig, "m_saits": MSAITSConfig,
-                  "geoboost": GeoBoostConfig, "geo_tcn": GeoTCNConfig, "linear": ModelConfig,
-                  "geo_blend": ModelConfig, "saits_boost": SAITSBoostConfig}
-LABELS = {"locf": "LOCF", "xgboost": "XGBoost", "brits": "BRITS + MIT",
-          "saits": "SAITS (segment MIT)", "m_saits": "M-SAITS (segment MIT)",
-          "geoboost": "GeoBoost (cross-log + local residual)", "geo_tcn": "GeoTCN (interpolation residual)",
-          "linear": "Linear interpolation", "geo_blend": "GeoBlend (SAITS + GeoBoost + GeoTCN ensemble)",
-          "saits_boost": "SAITS + supervised residual trees"}
-DEPENDENCIES = {"geo_blend": ("saits", "geoboost", "geo_tcn"), "saits_boost": ("saits",)}
+                  "saits": SAITSConfig, "geo_blend": GeoBlendConfig}
+LABELS = {"locf": "LOCF", "xgboost": "XGBoost", "saits": "SAITS (segment MIT)",
+          "geo_blend": "GeoBlend (SAITS + tree + temporal ensemble)"}
+DEPENDENCIES = {"geo_blend": ("saits",)}
+# Only checkpoint compatibility uses these names; users cannot select them as models.
+_COMPONENTS = {"geoboost": (GeoBoost, GeoBoostConfig), "geo_tcn": (GeoTCN, GeoTCNConfig)}
 METRICS = ("mae", "mse", "rmse", "r2", "mape")
 
 
@@ -268,7 +259,7 @@ def capture_provenance(project_root, output_dir):
             packages[name] = None
     files = list((project_root / "src").rglob("*.py"))
     files += [project_root / "notebook" / "geolink.ipynb",
-              project_root / "notebook" / "m_saits.ipynb", project_root / "requirements.txt"]
+              project_root / "requirements.txt"]
     hashes = {}
     for source in files:
         if source.is_file():
@@ -291,12 +282,11 @@ def make_config(name, common, settings, seed, args, artifact_dir):
     if name == "xgboost":
         parameters.update(n_estimators=args.xgb_estimators,
                           device="cuda" if torch.cuda.is_available() else "cpu")
-    elif name in ("geoboost", "saits_boost"):
-        parameters.setdefault("device", "cpu")
-    elif name not in ("locf", "linear", "geo_blend"):
-        parameters.update(epochs=getattr(args, f"{name}_epochs"),
-                          patience=getattr(args, f"{name}_patience"),
+    elif name == "saits":
+        parameters.update(epochs=args.saits_epochs, patience=args.saits_patience,
                           device="gpu" if torch.cuda.is_available() else "cpu")
+    elif name == "geo_blend":
+        parameters.setdefault("device", "gpu" if torch.cuda.is_available() else "cpu")
     return CONFIG_CLASSES[name](**parameters)
 
 
@@ -304,15 +294,15 @@ def _load_joblib(artifact):
     """Read our trusted uncompressed checkpoints across Windows/Kaggle paths."""
     try:
         return joblib.load(artifact)
-    except NotImplementedError as error:
-        if "Path" not in str(error):
-            raise
+    except (NotImplementedError, ModuleNotFoundError):
         from joblib.numpy_pickle import NumpyUnpickler
 
         class PortablePaths(NumpyUnpickler):
             def find_class(self, module, name):
                 if module == "pathlib" and name in ("WindowsPath", "PosixPath"):
                     return Path
+                module = {"src.models.geoboost": "src.models._geoblend.trees",
+                          "src.models.geo_tcn": "src.models._geoblend.temporal"}.get(module, module)
                 return super().find_class(module, name)
 
         with Path(artifact).open("rb") as stream:
@@ -320,25 +310,19 @@ def _load_joblib(artifact):
 
 
 def _restore(name, artifact, config):
-    model = MODEL_CLASSES[name](CONFIG_CLASSES[name](**config))
+    cls, config_cls = _COMPONENTS[name] if name in _COMPONENTS else (MODEL_CLASSES[name], CONFIG_CLASSES[name])
+    model = cls(config_cls(**config))
     if name == "xgboost":
         model.backend.models = _load_joblib(artifact)["models"]
     elif name == "geoboost":
         model._backend = _load_joblib(artifact)["backend"]
-    elif name == "saits_boost":
-        saved = _load_joblib(artifact)
-        model.backend.models = saved["models"]
-        model.backend.weights = np.asarray(saved["weights"])
-        model.backend.calibration = saved["calibration"]
-        member = saved["member"]
-        model.backend.member = _restore("saits", Path(artifact).parent / member["artifact"], member["config"])
     elif name == "geo_blend":
         saved = json.loads(Path(artifact).read_text(encoding="utf-8"))
         model.backend.weights = np.asarray(saved["weights"])
         model.backend.calibration = saved["calibration"]
         model.backend.members = [_restore(e["model"], Path(artifact).parent / e["artifact"], e["config"])
                                  for e in saved["members"]]
-    elif name not in ("locf", "linear"):
+    elif name != "locf":
         # Only locally produced artifacts from this run are loaded here.
         # Older Kaggle checkpoints contain concrete PosixPath objects in config.
         # Map only those known path types; avoid unrestricted pickle loading.
@@ -391,10 +375,9 @@ def run_experiment(args, project_root, settings):
                 "selection": "Neural checkpoints: mean validation RMSE. GeoBoost trees and local weights: validation only. GeoBlend: convex validation weights of SAITS/GeoBoost/GeoTCN. No seed selection.",
                 "std_definition": "sample standard deviation across training seeds (ddof=1); null for one run",
                 "mit_reduction": "per-segment MAE, then batch mean; uniform scenario sampling",
-                "new_model_objectives": {"geo_tcn": "per-segment MAE + 0.5*MSE on dynamic pseudo-gaps",
-                                         "geoboost": "cross-log squared error; gap residual squared error with segment weights",
-                                         "saits_boost": "frozen SAITS; residual squared error on fresh train masks; validation calibration",
-                                         "geo_blend": "validation-only convex MSE calibration per log/gap class"},
+                "geoblend_objectives": {"temporal_component": "per-segment MAE + 0.5*MSE on dynamic pseudo-gaps",
+                                        "tree_component": "cross-log squared error; gap residual squared error with segment weights",
+                                        "calibration": "validation-only convex MSE per log/gap class"},
                 "metric_units": "normalized except per-log original-unit rows; MAPE only in original units",
                 "mape_zero_policy": "Exclude exactly zero physical targets from MAPE only",
                 "holdout_note": "A new untouched well holdout is required for a final unbiased claim."}
@@ -425,7 +408,7 @@ def run_experiment(args, project_root, settings):
         manifest["status"] = "training"
         persist()
         for name in names:
-            for seed in (seeds[:1] if name in ("locf", "linear") else seeds):
+            for seed in (seeds[:1] if name == "locf" else seeds):
                 set_seed(seed)
                 artifact_dir = output_dir / name / f"seed_{seed}"
                 artifact_dir.mkdir(parents=True)
@@ -437,32 +420,32 @@ def run_experiment(args, project_root, settings):
                     for member_name in DEPENDENCIES[name]:
                         member = next(e for e in manifest["runs"] if e["model"] == member_name and e["seed"] == seed)
                         restored = _restore(member_name, output_dir / member["artifact"], member["config"])
-                        if name == "geo_blend":
-                            model.backend.members.append(restored)
-                        else:
-                            model.backend.member = restored
+                        model.backend.members.append(restored)
                         members.append({**member, "artifact": os.path.relpath(output_dir / member["artifact"], artifact_dir)})
-                if name not in ("locf", "linear"):
+                if name != "locf":
                     validation = data["val"]["Block-20"] if name == "xgboost" else monitor
                     model.fit(data["train"], validation)
                 entry = {"model": name, "label": LABELS[name], "seed": seed,
                          "config": asdict(config), "best_epoch": getattr(model.backend, "best_epoch", None)}
                 if name == "geo_blend":
+                    for component_name, component in zip(("geoboost", "geo_tcn"), model.backend.members[1:]):
+                        folder = artifact_dir / "components" / component_name
+                        folder.mkdir(parents=True, exist_ok=True)
+                        if component_name == "geoboost":
+                            component_path = folder / "model.joblib"
+                            joblib.dump({"backend": component.backend}, component_path)
+                        else:
+                            component_path = folder / "model.pt"
+                            torch.save({"state_dict": component.backend.network.state_dict()}, component_path)
+                        members.append(dict(model=component_name, config=asdict(component.config),
+                                            artifact=str(component_path.relative_to(artifact_dir)),
+                                            sha256=sha256(component_path)))
                     artifact = artifact_dir / "model.json"
                     save_json(artifact, {"members": members, "weights": model.backend.weights.tolist(),
                                          "calibration": model.backend.calibration})
                     entry["calibration"] = model.backend.calibration
-                elif name == "saits_boost":
-                    artifact = artifact_dir / "model.joblib"
-                    joblib.dump({"models": model.backend.models, "weights": model.backend.weights,
-                                 "calibration": model.backend.calibration, "member": members[0]}, artifact)
-                    entry["calibration"] = model.backend.calibration
-                    history.extend({"model": name, "seed": seed, **point} for point in model.backend.training_history)
-                elif name == "geoboost":
-                    artifact = artifact_dir / "model.joblib"
-                    joblib.dump({"config": asdict(config), "backend": model.backend}, artifact)
-                    entry["calibration"] = model.backend.calibration
-                    history.extend({"model": name, "seed": seed, **point} for point in model.backend.training_history)
+                    history.extend({"model": name, "seed": seed, **point}
+                                   for point in model.backend.training_history)
                 elif name == "xgboost":
                     artifact = artifact_dir / "model.joblib"
                     joblib.dump({"config": asdict(config), "models": model.backend.models}, artifact)
@@ -472,7 +455,7 @@ def run_experiment(args, project_root, settings):
                             history.append({"model": name, "seed": seed, "log_index": point["log_index"],
                                             "iteration": iteration, "train_rmse": loss,
                                             "validation_rmse": curve[iteration-1] if len(curve) >= iteration else None})
-                elif name not in ("locf", "linear"):
+                elif name != "locf":
                     artifact = artifact_dir / "model.pt"
                     torch.save({"config": _json_safe(asdict(config)), "state_dict": model.backend.network.state_dict(),
                                 "best_epoch": model.backend.best_epoch,

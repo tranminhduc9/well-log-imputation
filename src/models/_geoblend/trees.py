@@ -14,7 +14,7 @@ from scipy.ndimage import uniform_filter1d
 from xgboost import XGBRegressor
 
 from src.models.model import AbstractModel, ModelConfig
-from src.models.geo_tcn import interpolation_features
+from src.models._geoblend.temporal import interpolation_features
 
 LOGGER = logging.getLogger(__name__)
 
