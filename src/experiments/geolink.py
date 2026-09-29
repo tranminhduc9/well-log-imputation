@@ -416,6 +416,24 @@ def run_experiment(args, project_root, settings):
                 config = make_config(name, common, settings, seed, args, artifact_dir)
                 LOGGER.info("%s seed=%d | %s", LABELS[name], seed, asdict(config))
                 model = MODEL_CLASSES[name](config)
+                cached_saits = getattr(args, "saits_cache", None) if name == "saits" else None
+                if cached_saits:
+                    cache = Path(cached_saits)
+                    saved_manifest = json.loads((cache / "experiment_results.json").read_text(encoding="utf-8"))
+                    if any(saved_manifest["data_sha256"].get(k) != v for k, v in hashes.items()
+                           if not k.startswith("test/")):
+                        raise ValueError("SAITS cache data mismatch.")
+                    saved_entry = next(e for e in saved_manifest["runs"] if e["model"] == "saits" and e["seed"] == seed)
+                    expected = _json_safe(asdict(config))
+                    if any(saved_entry["config"].get(k) != v for k, v in expected.items() if k != "output_dir"):
+                        raise ValueError("SAITS cache configuration mismatch.")
+                    checkpoint = cache / saved_entry["artifact"]
+                    if sha256(checkpoint) != saved_entry["sha256"]:
+                        raise ValueError("SAITS cache checkpoint hash mismatch.")
+                    model = _restore(name, checkpoint, saved_entry["config"])
+                    saved_state = torch.load(checkpoint, map_location=model.backend.device, weights_only=True)
+                    model.backend.best_epoch = saved_state.get("best_epoch")
+                    model.backend.training_history = saved_state.get("training_history", [])
                 members = []
                 if name in DEPENDENCIES:
                     for member_name in DEPENDENCIES[name]:
@@ -423,7 +441,7 @@ def run_experiment(args, project_root, settings):
                         restored = _restore(member_name, output_dir / member["artifact"], member["config"])
                         model.backend.members.append(restored)
                         members.append({**member, "artifact": os.path.relpath(output_dir / member["artifact"], artifact_dir)})
-                if name != "locf":
+                if name != "locf" and not cached_saits:
                     validation = data["val"]["Block-20"] if name == "xgboost" else monitor
                     model.fit(data["train"], validation)
                 entry = {"model": name, "label": LABELS[name], "seed": seed,
@@ -468,7 +486,8 @@ def run_experiment(args, project_root, settings):
                 entry.update(artifact=str(artifact.relative_to(output_dir)), sha256=sha256(artifact))
                 manifest["runs"].append(entry)
                 persist()  # Artifact/history survive even if scoring fails.
-                rows.extend(evaluate_details(model, data["val"], metadata["val"], preprocessing, name, seed, "val"))
+                if name in getattr(args, "report_models", names):
+                    rows.extend(evaluate_details(model, data["val"], metadata["val"], preprocessing, name, seed, "val"))
                 persist()
                 del model
                 gc.collect()
@@ -488,7 +507,8 @@ def run_experiment(args, project_root, settings):
                     torch.cuda.empty_cache()
         manifest["status"] = "complete"
         persist()
-        write_comparison(rows, output_dir)
+        if not hasattr(args, "report_models"):
+            write_comparison(rows, output_dir)
     except Exception as error:
         manifest.update(status="failed", error=f"{type(error).__name__}: {error}")
         save_json(output_dir / "experiment_results.json", {**manifest, "metrics": rows})
