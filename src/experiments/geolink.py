@@ -41,14 +41,17 @@ from src.preprocessing.pipeline import MISSING_SCENARIOS, BLOCK_LENGTHS
 
 
 LOGGER = logging.getLogger(__name__)
-MODEL_CLASSES = {"locf": LOCF, "xgboost": XGBoost, "saits": SAITS, "brits": BRITS, "geo_blend": GeoBlend}
+MODEL_CLASSES = {"locf": LOCF, "xgboost": XGBoost, "saits": SAITS, "brits": BRITS,
+                 "geo_tcn": GeoTCN, "geo_blend": GeoBlend}
 CONFIG_CLASSES = {"locf": ModelConfig, "xgboost": XGBoostConfig,
-                  "saits": SAITSConfig, "brits": BRITSConfig, "geo_blend": GeoBlendConfig}
+                  "saits": SAITSConfig, "brits": BRITSConfig, "geo_tcn": GeoTCNConfig,
+                  "geo_blend": GeoBlendConfig}
 LABELS = {"brits": "BRITS (segment MIT)", "locf": "LOCF", "xgboost": "XGBoost", "saits": "SAITS (segment MIT)",
+          "geo_tcn": "GeoTCN (interpolation + temporal convolution)",
           "geo_blend": "GeoBlend (SAITS + tree + temporal ensemble)"}
 DEPENDENCIES = {"geo_blend": ("saits",)}
-# Only checkpoint compatibility uses these names; users cannot select them as models.
-_COMPONENTS = {"geoboost": (GeoBoost, GeoBoostConfig), "geo_tcn": (GeoTCN, GeoTCNConfig)}
+# GeoBoost remains an internal component; GeoTCN can also run independently.
+_COMPONENTS = {"geoboost": (GeoBoost, GeoBoostConfig)}
 METRICS = ("mae", "mse", "rmse", "r2", "mape")
 
 
@@ -286,7 +289,7 @@ def make_config(name, common, settings, seed, args, artifact_dir):
     elif name in {"saits", "brits"}:
         parameters.update(epochs=args.saits_epochs, patience=args.saits_patience,
                           device="gpu" if torch.cuda.is_available() else "cpu")
-    elif name == "geo_blend":
+    elif name in {"geo_tcn", "geo_blend"}:
         parameters.setdefault("device", "gpu" if torch.cuda.is_available() else "cpu")
     return CONFIG_CLASSES[name](**parameters)
 
@@ -373,7 +376,7 @@ def run_experiment(args, project_root, settings):
                 "data_root": str(data_root.resolve()), "models": names, "runs": [],
                 "evaluate_test": args.evaluate_test,
                 "test_role": "development: this split has already informed model changes",
-                "selection": "Neural checkpoints: mean validation RMSE. GeoBoost trees and local weights: validation only. GeoBlend: convex validation weights of SAITS/GeoBoost/GeoTCN. No seed selection.",
+                "selection": "Neural checkpoints, including GeoTCN: mean validation RMSE. GeoBoost trees and local weights: validation only. GeoBlend: convex validation weights of SAITS/GeoBoost/GeoTCN. No seed selection.",
                 "std_definition": "sample standard deviation across training seeds (ddof=1); null for one run",
                 "mit_reduction": "per-segment MAE, then batch mean; uniform scenario sampling",
                 "geoblend_objectives": {"temporal_component": "per-segment MAE + 0.5*MSE on dynamic pseudo-gaps",
