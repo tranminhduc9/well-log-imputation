@@ -29,7 +29,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.models.model import AbstractModel, ModelConfig
-from src.models.losses import masked_imputation_mae
+from src.models.losses import masked_imputation_mae, masked_imputation_mse
 from src.preprocessing.pipeline import create_missing_mask
 
 
@@ -61,6 +61,10 @@ class MSAITSConfig(ModelConfig):
     diagonal_attention_mask: bool = True
     ort_weight: float = 1.0
     mit_weight: float = 1.0
+    # Optional squared-error supervision on artificial gaps; zero preserves
+    # the existing MAE objective and checkpoint architecture.
+    mit_mse_weight: float = 0.0
+    gradient_clip: float | None = None
     mit_reduction: str = "segment"
     min_delta: float = 1e-4
     temporal_residual: bool = False
@@ -120,7 +124,13 @@ class MSAITSConfig(ModelConfig):
             raise ValueError("masking_strategy must be 'mixed' or 'random'.")
         if self.ort_weight < 0 or self.mit_weight < 0 or self.min_delta < 0:
             raise ValueError("M-SAITS loss weights and min_delta must be non-negative.")
-        if self.ort_weight == self.mit_weight == 0:
+        if not math.isfinite(self.mit_mse_weight) or self.mit_mse_weight < 0:
+            raise ValueError("mit_mse_weight must be finite and non-negative.")
+        if self.gradient_clip is not None and (
+            not math.isfinite(self.gradient_clip) or self.gradient_clip <= 0
+        ):
+            raise ValueError("gradient_clip must be None or finite and positive.")
+        if self.ort_weight == self.mit_weight == self.mit_mse_weight == 0:
             raise ValueError("At least one M-SAITS loss weight must be positive.")
 
 
@@ -571,6 +581,7 @@ class _MSAITSBackend:
             loss_total = 0.0
             ort_total = 0.0
             mit_total = 0.0
+            mit_mse_total = 0.0
             for batch_inputs, batch_truth, batch_observed, batch_hidden, batch_depth in loader:
                 batch_inputs = batch_inputs.to(self.device)
                 batch_truth = batch_truth.to(self.device)
@@ -588,14 +599,27 @@ class _MSAITSBackend:
                     combined, batch_truth, batch_hidden, self.config.mit_reduction
                 )
                 loss = self.config.ort_weight * ort + self.config.mit_weight * mit
+                mit_mse = None
+                if self.config.mit_mse_weight:
+                    mit_mse = masked_imputation_mse(
+                        combined, batch_truth, batch_hidden, self.config.mit_reduction
+                    )
+                    loss = loss + self.config.mit_mse_weight * mit_mse
                 if not torch.isfinite(loss):
                     raise RuntimeError("M-SAITS training loss is non-finite.")
                 optimizer.zero_grad()
                 loss.backward()
+                if self.config.gradient_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.network.parameters(), self.config.gradient_clip,
+                        error_if_nonfinite=True,
+                    )
                 optimizer.step()
                 loss_total += float(loss.item())
                 ort_total += float(ort.item())
                 mit_total += float(mit.item())
+                if mit_mse is not None:
+                    mit_mse_total += float(mit_mse.item())
 
             batches = len(loader)
             train_loss = loss_total / batches
@@ -615,6 +639,7 @@ class _MSAITSBackend:
                     "loss": train_loss,
                     "ort_loss": ort_total / batches,
                     "mit_loss": mit_total / batches,
+                    "mit_mse_loss": mit_mse_total / batches,
                     "validation_rmse": (
                         score if val_set is not None else float("nan")
                     ),

@@ -22,7 +22,7 @@ import torch
 
 from src.models.m_saits import MSAITS, MSAITSConfig
 from src.experiments.geolink import (
-    capture_provenance, evaluate_details, load_and_check_data, save_json,
+    _json_safe, capture_provenance, evaluate_details, load_and_check_data, save_json,
     set_seed, sha256, summarize,
 )
 
@@ -179,7 +179,9 @@ class MSAITSStudy:
         names = [name for name, _ in candidates]
         if len(set(names)) != len(names) or any(not re.fullmatch(r"[a-z0-9_]+", n) for n in names):
             raise ValueError("Candidate names must be safe and unique.")
-        specification = [{"name": n, "settings": s} for n, s in candidates]
+        # Tuple-valued settings (e.g. convolution kernels) become JSON lists.
+        # Compare their serialized form so an unchanged study can resume.
+        specification = _json_safe([{"name": n, "settings": s} for n, s in candidates])
         if stage in self.manifest["stages"] and self.manifest["stages"][stage]["candidates"] != specification:
             raise ValueError("Stage grid changed. Use a new study directory.")
         for name, settings in candidates:

@@ -18,3 +18,20 @@ def masked_imputation_mae(prediction, truth, mask, reduction="segment"):
     counts = mask.flatten(1).sum(1)
     losses = error.flatten(1).sum(1) / counts.clamp_min(1)
     return losses.sum() / (counts > 0).sum().clamp_min(1)
+
+
+def masked_imputation_mse(prediction, truth, mask, reduction="segment"):
+    """Squared error with the same gap/segment weighting as MIT MAE.
+
+    Select the residual before squaring so unscored NaNs cannot contaminate
+    the gradient. Empty segments are excluded from the segment average.
+    """
+    residual = torch.where(mask.bool(), prediction - truth, 0.0)
+    error = residual.square()
+    if reduction == "point":
+        return error.sum() / mask.sum().clamp_min(1)
+    if reduction != "segment":
+        raise ValueError("MIT reduction must be 'segment' or 'point'.")
+    counts = mask.flatten(1).sum(1)
+    losses = error.flatten(1).sum(1) / counts.clamp_min(1)
+    return losses.sum() / (counts > 0).sum().clamp_min(1)
