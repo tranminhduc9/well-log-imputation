@@ -76,13 +76,43 @@ class MSAITSConfig(ModelConfig):
     depth_encoding: bool = False
     depth_mean: float = 0.0
     depth_std: float = 1.0
+    cross_log_attention: bool = False
+    cross_log_width: int = 32
+    mit_relative_weight: float = 0.0
+    physical_means: tuple[float, ...] = ()
+    physical_stds: tuple[float, ...] = ()
+    relative_floors: tuple[float, ...] = ()
+    validation_objective: str = "rmse"
+    reference_rmse: float = 1.0
+    reference_mape: float = 1.0
+    validation_mape_floor: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.encoder_norm not in {"batch", "layer"}:
             raise ValueError("encoder_norm must be 'batch' or 'layer'.")
-        if self.decoder not in {"shared", "per_log"} or self.decoder_width <= 0:
+        if self.decoder not in {"shared", "per_log", "conditional"} or self.decoder_width <= 0:
             raise ValueError("Invalid decoder or decoder_width.")
+        if self.cross_log_width <= 0 or (self.cross_log_attention and
+                (self.n_heads <= 0 or self.cross_log_width % self.n_heads)):
+            raise ValueError("cross_log_width must be positive and divisible by n_heads")
+        if self.validation_objective not in {"rmse", "rmse_mape"}:
+            raise ValueError("Invalid validation_objective")
+        if not math.isfinite(self.mit_relative_weight) or self.mit_relative_weight < 0:
+            raise ValueError("mit_relative_weight must be finite and non-negative")
+        for name in ("physical_means", "physical_stds", "relative_floors"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        if self.mit_relative_weight or self.validation_objective == "rmse_mape":
+            if any(len(getattr(self, name)) != self.n_features for name in
+                   ("physical_means", "physical_stds", "relative_floors")):
+                raise ValueError("Physical normalization/floors must cover every feature")
+            if not np.isfinite(self.physical_means).all() or any(
+                not np.isfinite(values).all() or np.any(np.asarray(values) <= 0)
+                for values in (self.physical_stds, self.relative_floors)
+            ):
+                raise ValueError("Invalid physical normalization/floors")
+        if any(not math.isfinite(v) or v <= 0 for v in (self.reference_rmse, self.reference_mape)):
+            raise ValueError("Reference metrics must be finite and positive")
         if self.mit_reduction not in {"segment", "point"}:
             raise ValueError("mit_reduction must be 'segment' or 'point'.")
         positive = {
@@ -130,7 +160,7 @@ class MSAITSConfig(ModelConfig):
             not math.isfinite(self.gradient_clip) or self.gradient_clip <= 0
         ):
             raise ValueError("gradient_clip must be None or finite and positive.")
-        if self.ort_weight == self.mit_weight == self.mit_mse_weight == 0:
+        if self.ort_weight == self.mit_weight == self.mit_mse_weight == self.mit_relative_weight == 0:
             raise ValueError("At least one M-SAITS loss weight must be positive.")
 
 
@@ -293,6 +323,49 @@ class _PerLogDecoder(nn.Module):
         return torch.cat([head(hidden) for head in self.heads], -1)
 
 
+class CrossLogAttention(nn.Module):
+    """Attention over observed LOGS at each depth, never over hidden targets."""
+    def __init__(self, config):
+        super().__init__()
+        width = config.cross_log_width
+        self.input = nn.Linear(2, width)
+        self.variable = nn.Parameter(torch.randn(config.n_features, width) * .02)
+        self.fallback = nn.Parameter(torch.zeros(1, 1, width))
+        self.attention = nn.MultiheadAttention(width, config.n_heads,
+                                               dropout=config.attn_dropout, batch_first=True)
+        self.norm = nn.LayerNorm(width)
+        self.output = nn.Linear(config.n_features * width, config.d_model)
+
+    def forward(self, values, observed):
+        batch, steps, features = values.shape
+        clean = torch.where(observed.bool(), values, 0.)
+        tokens = self.input(torch.stack((clean, observed), -1)) + self.variable
+        tokens = tokens.reshape(batch * steps, features, -1)
+        valid = observed.reshape(batch * steps, features).bool()
+        keys = torch.cat((tokens, self.fallback.expand(batch * steps, -1, -1)), 1)
+        # Sentinel prevents all-masked attention NaNs; active only when no log is observed.
+        padding = torch.cat((~valid, valid.any(-1, keepdim=True)), -1)
+        attended, _ = self.attention(tokens, keys, keys, key_padding_mask=padding, need_weights=False)
+        return self.output(self.norm(tokens + attended).reshape(batch, steps, -1))
+
+
+class ConditionalLogDecoder(nn.Module):
+    """A target-specific head with direct access to other observed logs/masks."""
+    def __init__(self, config):
+        super().__init__()
+        self.other_logs = [tuple(j for j in range(config.n_features) if j != i)
+                           for i in range(config.n_features)]
+        self.heads = nn.ModuleList(nn.Sequential(
+            nn.Linear(config.d_model + 2 * (config.n_features - 1), config.decoder_width),
+            nn.GELU(), nn.Linear(config.decoder_width, 1)) for _ in self.other_logs)
+
+    def forward(self, hidden, values, observed):
+        clean = torch.where(observed.bool(), values, 0.)
+        return torch.cat([head(torch.cat((hidden, clean[..., list(indices)],
+                                         observed[..., list(indices)]), -1))
+                          for head, indices in zip(self.heads, self.other_logs)], -1)
+
+
 class DiagonallyMaskedAttentionLayer(nn.Module):
     """Transformer encoder layer whose attention cannot view the same step."""
 
@@ -365,6 +438,7 @@ class MSAITSNetwork(nn.Module):
         super().__init__()
         self.config = config
         self.encoder = DecoupledFeatureEncoder(config)
+        self.cross_log_encoder = CrossLogAttention(config) if config.cross_log_attention else None
         self.first_embedding = nn.Linear(config.d_model, config.d_model)
         self.second_embedding = nn.Linear(
             config.d_model + config.n_features, config.d_model
@@ -393,6 +467,8 @@ class MSAITSNetwork(nn.Module):
         )
         if config.decoder == "per_log":
             self.second_output = _PerLogDecoder(config)
+        elif config.decoder == "conditional":
+            self.second_output = ConditionalLogDecoder(config)
         # At each time step: observed mask (M) + attention row (T) -> eta (M).
         self.gate = nn.Linear(
             config.n_features + config.seq_len + (6 * config.n_features if config.gap_aware_gate else 0),
@@ -420,6 +496,8 @@ class MSAITSNetwork(nn.Module):
         depth: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         encoded = self.encoder(values, observed)
+        if self.cross_log_encoder is not None:
+            encoded = encoded + self.cross_log_encoder(values, observed)
         position = self.position
         if self.depth_projection is not None:
             if depth is None:
@@ -443,7 +521,8 @@ class MSAITSNetwork(nn.Module):
         second_hidden, attention = self._attention_block(
             second_hidden, self.second_block
         )
-        estimate_second = self.second_output(second_hidden)
+        estimate_second = (self.second_output(second_hidden, values, observed)
+                           if self.config.decoder == "conditional" else self.second_output(second_hidden))
 
         mean_attention = attention.mean(dim=1)
         gate_input = [observed, mean_attention]
@@ -582,6 +661,7 @@ class _MSAITSBackend:
             ort_total = 0.0
             mit_total = 0.0
             mit_mse_total = 0.0
+            relative_total = 0.0
             for batch_inputs, batch_truth, batch_observed, batch_hidden, batch_depth in loader:
                 batch_inputs = batch_inputs.to(self.device)
                 batch_truth = batch_truth.to(self.device)
@@ -605,6 +685,18 @@ class _MSAITSBackend:
                         combined, batch_truth, batch_hidden, self.config.mit_reduction
                     )
                     loss = loss + self.config.mit_mse_weight * mit_mse
+                if self.config.mit_relative_weight:
+                    scales = batch_truth.new_tensor(self.config.physical_stds)
+                    means = batch_truth.new_tensor(self.config.physical_means)
+                    floors = batch_truth.new_tensor(self.config.relative_floors)
+                    physical_truth = batch_truth * scales + means
+                    denominator = physical_truth.abs().clamp_min(floors)
+                    relative_mask = batch_hidden
+                    relative_prediction = (combined - batch_truth) * scales / denominator
+                    relative = masked_imputation_mae(relative_prediction, torch.zeros_like(combined),
+                                                      relative_mask, self.config.mit_reduction)
+                    loss = loss + self.config.mit_relative_weight * relative
+                    relative_total += float(relative.item())
                 if not torch.isfinite(loss):
                     raise RuntimeError("M-SAITS training loss is non-finite.")
                 optimizer.zero_grad()
@@ -623,11 +715,15 @@ class _MSAITSBackend:
 
             batches = len(loader)
             train_loss = loss_total / batches
-            score = (
-                self._validation_rmse(val_set)
-                if val_set is not None
-                else train_loss
-            )
+            validation_rmse, validation_mape = float("nan"), float("nan")
+            if val_set is None:
+                score = train_loss
+            elif self.config.validation_objective == "rmse_mape":
+                validation_rmse, validation_mape = self._validation_objectives(val_set)
+                score = max(validation_rmse / self.config.reference_rmse,
+                            validation_mape / self.config.reference_mape)
+            else:
+                score = validation_rmse = self._validation_rmse(val_set)
             if not math.isfinite(score):
                 raise RuntimeError(
                     "M-SAITS produced a non-finite selection score at "
@@ -640,9 +736,11 @@ class _MSAITSBackend:
                     "ort_loss": ort_total / batches,
                     "mit_loss": mit_total / batches,
                     "mit_mse_loss": mit_mse_total / batches,
-                    "validation_rmse": (
-                        score if val_set is not None else float("nan")
-                    ),
+                    "mit_relative_loss": relative_total / batches,
+                    "validation_rmse": validation_rmse,
+                    **({"validation_mape": validation_mape}
+                       if self.config.validation_objective == "rmse_mape" else {}),
+                    "validation_score": score,
                 }
             )
             LOGGER.info(
@@ -737,6 +835,39 @@ class _MSAITSBackend:
         if count == 0:
             raise ValueError("M-SAITS validation has no masked values to score.")
         return math.sqrt(error_sum / count)
+
+    def _validation_objectives(self, dataset):
+        """Equal scenario RMSE; equal log then scenario physical MAPE (exact-zero exclusion)."""
+        from src.data.metrics import compute_imputation_metrics
+        scenarios = dataset.get("validation_scenarios", {"single": dataset})
+        scores = []
+        for data in scenarios.values():
+            model_input = {"X": data["X"]}
+            if "depth" in data:
+                model_input["depth"] = data["depth"]
+            prediction = self.predict(model_input)["imputation"]
+            truth, mask = data["X_intact"], data["indicating_mask"]
+            rmse = compute_imputation_metrics(truth, prediction, mask, include_mape=False)["rmse"]
+            mapes = []
+            for index, (mean, std) in enumerate(zip(self.config.physical_means, self.config.physical_stds)):
+                if not mask[..., index].any():
+                    raise ValueError("Joint validation requires scored points in every log/scenario")
+                target = truth[..., index] * std + mean
+                estimate = prediction[..., index] * std + mean
+                if self.config.validation_mape_floor:
+                    selected = mask[..., index].astype(bool)
+                    physical_target = target[selected].astype(np.float64)
+                    value = 100 * np.mean(np.abs(estimate[selected].astype(np.float64)-physical_target) /
+                        np.maximum(np.abs(physical_target), self.config.relative_floors[index]))
+                else:
+                    value = compute_imputation_metrics(target, estimate, mask[..., index])["mape"]
+                if not math.isfinite(value):
+                    raise ValueError("Undefined physical MAPE in validation")
+                mapes.append(value)
+            scores.append((rmse, float(np.mean(mapes))))
+        if not scores:
+            raise ValueError("Empty validation scenarios")
+        return tuple(np.mean(scores, axis=0))
 
     def _predict_batch(self, values: np.ndarray, depth: np.ndarray | None = None) -> np.ndarray:
         batch = torch.as_tensor(values, dtype=torch.float32, device=self.device)

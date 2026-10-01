@@ -235,7 +235,8 @@ class MSAITSStudy:
                                 "best_epoch": model.backend.best_epoch}, temporary)
                     temporary.replace(folder / "best.pt")
                     rows = evaluate_details(model, self.data["val"], self.metadata["val"],
-                        self.preprocessing, "m_saits", seed, "val", include_well_log=True)
+                        self.preprocessing, "m_saits", seed, "val", include_well_log=True,
+                        mape_floors=config.relative_floors or None)
                     save_json(folder / "metrics.json", rows)
                     pd.DataFrame(model.backend.training_history).to_csv(folder / "history.csv", index=False)
                     entry["runs"][str(seed)] = dict(status="complete", resumed=resumed,

@@ -166,7 +166,7 @@ def load_and_check_data(data_root, evaluate_test):
 
 
 def evaluate_details(model, datasets, metadata, preprocessing, model_name, seed, split,
-                     *, include_well_log=False):
+                     *, include_well_log=False, mape_floors=None):
     """Evaluate one prediction pass per scenario, including per-log/per-well rows.
 
     Pooled/within-well errors are normalized. Per-log errors are additionally
@@ -185,10 +185,17 @@ def evaluate_details(model, datasets, metadata, preprocessing, model_name, seed,
         if not np.allclose(prediction[~mask], dataset["X"][~mask], rtol=1e-6, atol=1e-7):
             raise ValueError(f"{model_name} changed observed values.")
 
-        def record(target, estimate, scored, level, group, units, mape=False):
+        def record(target, estimate, scored, level, group, units, mape=False, floor=None):
             if not scored.any():
                 return
             metrics = compute_imputation_metrics(target, estimate, scored, include_mape=mape)
+            if floor is not None:
+                if not np.isfinite(floor) or floor <= 0:
+                    raise ValueError("MAPE floor must be finite and positive")
+                target_values = np.asarray(target, dtype=np.float64)[scored.astype(bool)]
+                estimate_values = np.asarray(estimate, dtype=np.float64)[scored.astype(bool)]
+                metrics["mape_floored"] = float(100 * np.mean(
+                    np.abs(estimate_values-target_values) / np.maximum(np.abs(target_values), floor)))
             if metrics["count"] != int(scored.sum()):
                 raise ValueError("Evaluation count does not match the fixed mask.")
             rows.append({"model": model_name, "label": LABELS[model_name], "seed": seed,
@@ -202,7 +209,8 @@ def evaluate_details(model, datasets, metadata, preprocessing, model_name, seed,
             scale = preprocessing["normalization"][log]
             record(truth[..., index] * scale["std"] + scale["mean"],
                    prediction[..., index] * scale["std"] + scale["mean"],
-                   mask[..., index], "log", log, "original", mape=True)
+                   mask[..., index], "log", log, "original", mape=True,
+                   floor=mape_floors[index] if mape_floors is not None else None)
         for well in metadata["WELL"].unique():
             selected = (metadata["WELL"] == well).to_numpy()
             record(truth[selected], prediction[selected], mask[selected], "well", well, "normalized")
@@ -275,13 +283,19 @@ def capture_provenance(project_root, output_dir):
 
 def make_config(name, common, settings, seed, args, artifact_dir):
     parameters = {**common, **settings.get(name, {}), "seed": seed, "output_dir": artifact_dir}
+    requested_device = getattr(args, "device", "auto")
+    if requested_device not in {"auto", "cpu", "cuda"}:
+        raise ValueError("device must be auto, cpu or cuda")
+    if requested_device == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA requested but unavailable")
+    selected_device = ("cuda" if torch.cuda.is_available() else "cpu") if requested_device == "auto" else requested_device
     if name == "xgboost":
         parameters.update(n_estimators=args.xgb_estimators,
-                          device="cuda" if torch.cuda.is_available() else "cpu")
+                          device=selected_device)
     elif name != "locf":
         parameters.update(epochs=getattr(args, f"{name}_epochs"),
                           patience=getattr(args, f"{name}_patience"),
-                          device="gpu" if torch.cuda.is_available() else "cpu")
+                          device=selected_device)
     return CONFIG_CLASSES[name](**parameters)
 
 
@@ -393,7 +407,8 @@ def run_experiment(args, project_root, settings):
                 entry.update(artifact=str(artifact.relative_to(output_dir)), sha256=sha256(artifact))
                 manifest["runs"].append(entry)
                 persist()  # Artifact/history survive even if scoring fails.
-                rows.extend(evaluate_details(model, data["val"], metadata["val"], preprocessing, name, seed, "val"))
+                rows.extend(evaluate_details(model, data["val"], metadata["val"], preprocessing, name, seed, "val",
+                                             mape_floors=getattr(args, "mape_floors", None)))
                 persist()
                 del model
                 gc.collect()
