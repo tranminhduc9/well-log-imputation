@@ -54,7 +54,7 @@ def _load_joblib_checkpoint(artifact):
 
 
 def discover_runs(result_dir):
-    """Read a native MSAITSStudy or full benchmark manifest; never rank by test."""
+    """Read a native ConvSAITSStudy or full benchmark manifest; never rank by test."""
     root = Path(result_dir).resolve()
     rows = []
     if (root / "study.json").is_file():
@@ -65,7 +65,7 @@ def discover_runs(result_dir):
                 if run.get("status") != "complete":
                     continue
                 artifact = root / trial / f"seed_{seed}" / "best.pt"
-                rows.append(dict(trial=trial, model="m_saits", seed=int(seed),
+                rows.append(dict(trial=trial, model="conv_saits", seed=int(seed),
                     artifact=str(artifact), sha256=run["hashes"]["best.pt"],
                     validation_winner=trial in winners))
     elif (root / "experiment_results.json").is_file():

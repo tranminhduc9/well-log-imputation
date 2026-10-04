@@ -32,18 +32,19 @@ from src.models.brits import BRITS, BRITSConfig
 from src.models.locf import LOCF
 from src.models.model import ModelConfig
 from src.models.saits import SAITS, SAITSConfig
-from src.models.m_saits import MSAITS, MSAITSConfig
+from src.models.conv_saits import ConvSAITS, ConvSAITSConfig
+from src.models._training import synchronized_time
 from src.models.xgboost import XGBoost, XGBoostConfig
 from src.preprocessing.pipeline import MISSING_SCENARIOS, BLOCK_LENGTHS
 
 
 LOGGER = logging.getLogger(__name__)
 MODEL_CLASSES = {"locf": LOCF, "xgboost": XGBoost, "brits": BRITS,
-                 "saits": SAITS, "m_saits": MSAITS}
+                 "saits": SAITS, "conv_saits": ConvSAITS}
 CONFIG_CLASSES = {"locf": ModelConfig, "xgboost": XGBoostConfig,
-                  "brits": BRITSConfig, "saits": SAITSConfig, "m_saits": MSAITSConfig}
+                  "brits": BRITSConfig, "saits": SAITSConfig, "conv_saits": ConvSAITSConfig}
 LABELS = {"locf": "LOCF", "xgboost": "XGBoost", "brits": "BRITS + MIT",
-          "saits": "SAITS (segment MIT)", "m_saits": "M-SAITS (segment MIT)"}
+          "saits": "SAITS (segment MIT)", "conv_saits": "Conv-SAITS (segment MIT)"}
 METRICS = ("mae", "mse", "rmse", "r2", "mape")
 
 
@@ -263,7 +264,7 @@ def capture_provenance(project_root, output_dir):
             packages[name] = None
     files = list((project_root / "src").rglob("*.py"))
     files += [project_root / "notebook" / "geo_link.ipynb",
-              project_root / "notebook" / "m_saits.ipynb", project_root / "requirements.txt"]
+              project_root / "notebook" / "conv_saits.ipynb", project_root / "requirements.txt"]
     hashes = {}
     for source in files:
         if source.is_file():
@@ -381,11 +382,15 @@ def run_experiment(args, project_root, settings):
                 config = make_config(name, common, settings, seed, args, artifact_dir)
                 LOGGER.info("%s seed=%d | %s", LABELS[name], seed, asdict(config))
                 model = MODEL_CLASSES[name](config)
+                fit_seconds = None
                 if name != "locf":
                     validation = data["val"]["Block-20"] if name == "xgboost" else monitor
+                    fit_started = synchronized_time(config.device)
                     model.fit(data["train"], validation)
+                    fit_seconds = synchronized_time(config.device) - fit_started
                 entry = {"model": name, "label": LABELS[name], "seed": seed,
-                         "config": asdict(config), "best_epoch": getattr(model.backend, "best_epoch", None)}
+                         "config": asdict(config), "fit_seconds": fit_seconds,
+                         "best_epoch": getattr(model.backend, "best_epoch", None)}
                 if name == "xgboost":
                     artifact = artifact_dir / "model.joblib"
                     joblib.dump({"config": asdict(config), "models": model.backend.models}, artifact)

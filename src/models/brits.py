@@ -1,7 +1,6 @@
 """Core BRITS model for multivariate well-log imputation."""
 
 from dataclasses import dataclass
-from copy import deepcopy
 import logging
 import math
 import time
@@ -9,10 +8,10 @@ import time
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
 
 from src.models.model import AbstractModel, ModelConfig
 from src.models.losses import masked_imputation_mae
+from src.models._training import EarlyStopping, training_loader, validation_metrics, predict_batches, synchronized_time
 from src.preprocessing.pipeline import BLOCK_LENGTHS, MISSING_SCENARIOS
 
 
@@ -269,35 +268,21 @@ class _BRITSBackend:
 
         self.training_history = []
         self.best_epoch = None
-        best_score = float("inf")
-        patience_score = float("inf")
-        best_state = None
-        epochs_without_improvement = 0
+        stopping = EarlyStopping(self.config.patience, self.config.min_delta)
         training_started = time.perf_counter()
         for epoch in range(self.config.epochs):
+            epoch_started = synchronized_time(self.device)
             observed, hidden = self._training_masks(train_set, truth, epoch)
-            inputs = np.where(observed, truth, 0).astype(np.float32)
-            targets = np.where(np.isfinite(truth), truth, 0).astype(np.float32)
-            loader = DataLoader(
-                TensorDataset(
-                    torch.from_numpy(inputs),
-                    torch.from_numpy(targets),
-                    torch.from_numpy(observed.astype(np.float32)),
-                    torch.from_numpy(hidden.astype(np.float32)),
-                ),
-                batch_size=self.config.batch_size,
-                shuffle=True,
-            )
+            loader = training_loader(truth, observed, hidden, self.config.batch_size)
             self.network.train()
             epoch_loss = 0.0
             reconstruction_total = 0.0
             consistency_total = 0.0
             mit_total = 0.0
             for batch, batch_truth, masks, batch_hidden in loader:
-                batch = batch.to(self.device)
-                batch_truth = batch_truth.to(self.device)
-                masks = masks.to(self.device)
-                batch_hidden = batch_hidden.to(self.device)
+                batch, batch_truth, masks, batch_hidden = (
+                    tensor.to(self.device) for tensor in (batch, batch_truth, masks, batch_hidden)
+                )
                 imputation, brits_loss, reconstruction, consistency = self.network(
                     batch, masks, return_components=True
                 )
@@ -319,6 +304,7 @@ class _BRITSBackend:
                 consistency_total += consistency.item()
                 mit_total += mit.item()
 
+            train_finished = synchronized_time(self.device)
             mean_loss = epoch_loss / len(loader)
             validation = self._validation_metrics(val_set) if val_set is not None else None
             validation_mse = None if validation is None else validation["mse"]
@@ -332,7 +318,11 @@ class _BRITSBackend:
             )
             if not np.isfinite(score):
                 raise RuntimeError(f"BRITS produced a non-finite selection score at epoch {epoch + 1}.")
+            validation_finished = synchronized_time(self.device)
             history_point = {
+                "train_seconds": train_finished - epoch_started,
+                "validation_seconds": validation_finished - train_finished,
+                "epoch_seconds": validation_finished - epoch_started,
                 "epoch": epoch + 1,
                 "loss": mean_loss,
                 "reconstruction_loss": reconstruction_total / len(loader),
@@ -359,82 +349,30 @@ class _BRITSBackend:
                 elapsed,
             )
 
-            if score < best_score:
-                best_score = score
-                best_state = deepcopy(self.network.state_dict())
-                self.best_epoch = epoch + 1
-            if patience_score - score > self.config.min_delta:
-                patience_score = score
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
-                if epochs_without_improvement >= self.config.patience:
-                    LOGGER.info(
-                        "BRITS early stopping at epoch %d | best epoch=%d | score=%.6f",
-                        epoch + 1,
-                        self.best_epoch,
-                        best_score,
-                    )
-                    break
-
-        if best_state is not None:
-            self.network.load_state_dict(best_state)
+            stopped = stopping.update(score, self.network, epoch + 1)
+            self.best_epoch = stopping.best_epoch
+            if stopped:
+                LOGGER.info("BRITS early stopping at epoch %d | best epoch=%d | score=%.6f",
+                            epoch + 1, self.best_epoch, stopping.best_score)
+                break
+        stopping.restore(self.network)
 
     def _validation_metrics(self, dataset):
-        scenarios = dataset.get("validation_scenarios")
-        if scenarios is not None:
-            if not scenarios:
-                raise ValueError("BRITS validation_scenarios must not be empty.")
-            by_scenario = {
-                name: self._validation_metrics(data)
-                for name, data in scenarios.items()
-            }
-            return {
-                "mse": float(np.mean([metrics["mse"] for metrics in by_scenario.values()])),
-                "rmse": float(np.mean([metrics["rmse"] for metrics in by_scenario.values()])),
-                "by_scenario": by_scenario,
-            }
-        if "X_intact" not in dataset or "indicating_mask" not in dataset:
-            raise ValueError("BRITS validation requires X_intact and indicating_mask.")
-        inputs = np.asarray(dataset["X"], dtype=np.float32)
-        truth = np.asarray(dataset["X_intact"], dtype=np.float32)
-        indicating_mask = np.asarray(dataset["indicating_mask"], dtype=bool)
-        squared_error = 0.0
-        count = 0
-        self.network.eval()
-        with torch.no_grad():
-            for start in range(0, len(inputs), self.config.batch_size):
-                end = start + self.config.batch_size
-                batch = torch.from_numpy(inputs[start:end]).to(self.device)
-                observed = torch.isfinite(batch).float()
-                predictions, _ = self.network(torch.nan_to_num(batch), observed)
-                valid = indicating_mask[start:end] & np.isfinite(truth[start:end])
-                difference = predictions.cpu().numpy()[valid] - truth[start:end][valid]
-                squared_error += float(np.square(difference.astype(np.float64)).sum())
-                count += int(valid.sum())
-        if count == 0:
-            raise ValueError("BRITS validation has no masked values to score.")
-        mse = float(squared_error / count)
-        return {"mse": mse, "rmse": float(np.sqrt(mse)), "by_scenario": {}}
+        return validation_metrics(dataset, self.predict, self.config.batch_size, "BRITS")
 
     def _validation_rmse(self, dataset):
         """Retain the previous helper API for callers that only need RMSE."""
 
         return self._validation_metrics(dataset)["rmse"]
 
+    def _predict_batch(self, values, depth=None):
+        batch = torch.from_numpy(values).to(self.device)
+        observed = torch.isfinite(batch).float()
+        imputation, _ = self.network(torch.nan_to_num(batch), observed)
+        return imputation.cpu().numpy()
+
     def predict(self, dataset):
-        values = np.asarray(dataset["X"], dtype=np.float32)
-        result = []
-        self.network.eval()
-
-        with torch.no_grad():
-            for start in range(0, len(values), self.config.batch_size):
-                batch = torch.from_numpy(values[start : start + self.config.batch_size]).to(self.device)
-                masks = torch.isfinite(batch).float()
-                imputation, _ = self.network(torch.nan_to_num(batch), masks)
-                result.append(imputation.cpu().numpy())
-
-        return {"imputation": np.concatenate(result)}
+        return predict_batches(self.network, self._predict_batch, dataset, self.config.batch_size)
 
 
 class BRITS(AbstractModel):

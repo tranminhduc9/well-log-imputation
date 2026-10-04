@@ -3,6 +3,11 @@
 import torch
 
 
+def masked_reconstruction_mae(prediction, truth, mask):
+    """Pooled MAE on observations (ORT), distinct from segment-weighted MIT."""
+    return ((prediction - truth).abs() * mask).sum() / mask.sum().clamp_min(1)
+
+
 def masked_imputation_mae(prediction, truth, mask, reduction="segment"):
     """Average each segment's masked MAE before averaging valid segments.
 

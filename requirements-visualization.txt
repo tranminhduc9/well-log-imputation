@@ -1,0 +1,5 @@
+# In addition to requirements.txt; no model training is needed for the notebook.
+matplotlib>=3.8
+nbformat>=5.10
+nbclient>=0.10
+ipykernel>=6.29

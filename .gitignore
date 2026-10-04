@@ -21,11 +21,15 @@ dist/
 
 # Jupyter notebooks
 .ipynb_checkpoints/
+.ipython/
+.jupyter_runtime/
+.matplotlib/
 
 # Local configuration and secrets
 .env
 .env.*
 !.env.example
+.aws/
 
 # IDE and operating-system files
 .idea/
@@ -37,14 +41,18 @@ Thumbs.db
 *.log
 *.tmp
 *.temp
+*.bak
+*.swp
+*.swo
 
 # Local datasets and generated artifacts
 /data/raw/*
 /data/processed/*
-artifacts/
-checkpoints/
-outputs/
-runs/
+/artifacts/
+/checkpoints/
+/outputs/
+/runs/
+/results/
 
 # Trained model files
 *.ckpt
@@ -58,3 +66,7 @@ runs/
 # Keep empty data directories in the repository when placeholders are added
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+
+# Archived obsolete files and temporary runs
+/.cleanup_archive/
+image/

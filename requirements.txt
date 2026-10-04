@@ -2,5 +2,8 @@ lasio
 numpy
 pandas
 scikit-learn
-torch
+torch>=2.6
 xgboost>=2.0
+scipy
+joblib
+threadpoolctl
