@@ -16,13 +16,14 @@ def synchronized_time(device):
     return time.perf_counter()
 
 
-def training_loader(truth, observed, hidden, batch_size, depth=None, seed=None):
+def training_loader(truth, observed, hidden, batch_size, depth=None, seed=None, pin_memory=False):
     arrays = [np.where(observed, truth, 0), np.where(np.isfinite(truth), truth, 0), observed, hidden]
     if depth is not None:
         arrays.append(depth)
     tensors = [torch.from_numpy(np.asarray(array, dtype=np.float32)) for array in arrays]
     generator = None if seed is None else torch.Generator().manual_seed(seed)
-    return DataLoader(TensorDataset(*tensors), batch_size=batch_size, shuffle=True, generator=generator)
+    return DataLoader(TensorDataset(*tensors), batch_size=batch_size, shuffle=True,
+                      generator=generator, pin_memory=pin_memory)
 
 
 def validation_metrics(dataset, predict, batch_size, name):

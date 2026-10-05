@@ -111,35 +111,51 @@ class RITS(nn.Module):
         self.decay_x = TemporalDecay(n_features, n_features, diagonal=True)
         self.combine = nn.Linear(n_features * 2, n_features)
 
-    def forward(self, values, masks, deltas):
+    def forward(self, values, masks, deltas, compute_loss=True):
         batch_size, sequence_length, _ = values.shape
         hidden = values.new_zeros(batch_size, self.hidden_size)
         cell = values.new_zeros(batch_size, self.hidden_size)
-        loss = values.new_tensor(0.0)
         imputations = []
+        errors = []
+        # Recurrent steps consume [batch, features]. Make these slices
+        # contiguous once instead of striding through batch-major tensors.
+        values = values.transpose(0, 1).contiguous()
+        masks = masks.transpose(0, 1).contiguous()
+        deltas = deltas.transpose(0, 1).contiguous()
+        # These projections depend only on the masks/deltas, not recurrent
+        # state. Compute them for the entire sequence in three large calls.
+        decay_h = self.decay_h(deltas)
+        missing = 1 - masks
+        weights = torch.sigmoid(self.combine(torch.cat((self.decay_x(deltas), masks), -1)))
+        feature_weight = self.feature.weight * self.feature.mask
 
         for step in range(sequence_length):
-            x = values[:, step]
-            mask = masks[:, step]
-            delta = deltas[:, step]
-
-            hidden = hidden * self.decay_h(delta)
+            x = values[step]
+            mask = masks[step]
+            hidden = hidden * decay_h[step]
             history = self.history(hidden)
-            loss = loss + _masked_mae(history, x, mask)
 
-            completed = mask * x + (1 - mask) * history
-            feature = self.feature(completed)
-            loss = loss + _masked_mae(feature, x, mask)
+            completed = mask * x + missing[step] * history
+            feature = nn.functional.linear(completed, feature_weight, self.feature.bias)
 
-            weight = torch.sigmoid(self.combine(torch.cat((self.decay_x(delta), mask), 1)))
+            weight = weights[step]
             estimate = weight * feature + (1 - weight) * history
-            loss = loss + _masked_mae(estimate, x, mask)
+            if compute_loss:
+                errors.append((torch.abs(history - x) + torch.abs(feature - x)
+                               + torch.abs(estimate - x)) * mask)
 
-            completed = mask * x + (1 - mask) * estimate
+            completed = mask * x + missing[step] * estimate
             hidden, cell = self.rnn(torch.cat((completed, mask), 1), (hidden, cell))
             imputations.append(completed)
 
-        return torch.stack(imputations, 1), loss / (sequence_length * 3)
+        loss = values.new_tensor(0.0)
+        if compute_loss:
+            # Preserve the original per-timestep normalization (not a pooled
+            # loss across the sequence), including empty-mask timesteps.
+            numerators = torch.stack(errors).sum(dim=(1, 2))
+            denominators = masks.sum(dim=(1, 2)) + 1e-5
+            loss = (numerators / denominators).sum() / (sequence_length * 3)
+        return torch.stack(imputations, 1), loss
 
 
 class BRITSNetwork(nn.Module):
@@ -149,8 +165,8 @@ class BRITSNetwork(nn.Module):
         self.backward_rits = RITS(n_features, hidden_size)
         self.consistency_weight = consistency_weight
 
-    def forward(self, values, masks, return_components=False):
-        forward, forward_loss = self.forward_rits(values, masks, _deltas(masks))
+    def forward(self, values, masks, return_components=False, compute_loss=True):
+        forward, forward_loss = self.forward_rits(values, masks, _deltas(masks), compute_loss)
 
         reverse_values = torch.flip(values, (1,))
         reverse_masks = torch.flip(masks, (1,))
@@ -158,10 +174,12 @@ class BRITSNetwork(nn.Module):
             reverse_values,
             reverse_masks,
             _deltas(reverse_masks),
+            compute_loss,
         )
         backward = torch.flip(backward, (1,))
 
-        consistency = torch.mean(torch.abs(forward - backward))
+        consistency = (torch.mean(torch.abs(forward - backward)) if compute_loss
+                       else values.new_tensor(0.0))
         reconstruction = forward_loss + backward_loss
         loss = reconstruction + self.consistency_weight * consistency
         imputation = (forward + backward) / 2
@@ -178,10 +196,12 @@ def _deltas(masks):
     """Unit depth steps since the latest observation for every log."""
 
     deltas = torch.zeros_like(masks)
-    for step in range(1, masks.shape[1]):
-        deltas[:, step] = (
-            1 + (1 - masks[:, step - 1]) * deltas[:, step - 1]
-        )
+    # The recurrence is distance from the most recent observation BEFORE the
+    # current step. cummax finds those positions in parallel for binary masks.
+    positions = torch.arange(masks.shape[1], device=masks.device).view(1, -1, 1)
+    observed_positions = torch.where(masks[:, :-1].bool(), positions[:, :-1], 0)
+    latest = observed_positions.cummax(dim=1).values
+    deltas[:, 1:] = (positions[:, 1:] - latest).to(masks.dtype)
     return deltas
 
 
@@ -196,6 +216,9 @@ class _BRITSBackend:
             config.hidden_size,
             config.consistency_weight,
         ).to(self.device)
+        LOGGER.info("BRITS actual device: %s", self.device)
+        if wants_gpu and self.device.type != "cuda":
+            LOGGER.warning("BRITS requested GPU but CUDA is unavailable; using CPU.")
         self.training_history = []
         self.best_epoch = None
 
@@ -273,15 +296,14 @@ class _BRITSBackend:
         for epoch in range(self.config.epochs):
             epoch_started = synchronized_time(self.device)
             observed, hidden = self._training_masks(train_set, truth, epoch)
-            loader = training_loader(truth, observed, hidden, self.config.batch_size)
+            loader = training_loader(truth, observed, hidden, self.config.batch_size,
+                                     pin_memory=self.device.type == "cuda")
             self.network.train()
-            epoch_loss = 0.0
-            reconstruction_total = 0.0
-            consistency_total = 0.0
-            mit_total = 0.0
+            totals = torch.zeros(4, device=self.device)
             for batch, batch_truth, masks, batch_hidden in loader:
                 batch, batch_truth, masks, batch_hidden = (
-                    tensor.to(self.device) for tensor in (batch, batch_truth, masks, batch_hidden)
+                    tensor.to(self.device, non_blocking=self.device.type == "cuda")
+                    for tensor in (batch, batch_truth, masks, batch_hidden)
                 )
                 imputation, brits_loss, reconstruction, consistency = self.network(
                     batch, masks, return_components=True
@@ -292,20 +314,17 @@ class _BRITSBackend:
                 loss = brits_loss + self.config.mit_weight * mit
                 if not torch.isfinite(loss):
                     raise RuntimeError("BRITS training loss is non-finite.")
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 if self.config.gradient_clip > 0:
                     nn.utils.clip_grad_norm_(
                         self.network.parameters(), self.config.gradient_clip
                     )
                 optimizer.step()
-                epoch_loss += loss.item()
-                reconstruction_total += reconstruction.item()
-                consistency_total += consistency.item()
-                mit_total += mit.item()
+                totals += torch.stack((loss, reconstruction, consistency, mit)).detach()
 
             train_finished = synchronized_time(self.device)
-            mean_loss = epoch_loss / len(loader)
+            mean_loss, reconstruction_mean, consistency_mean, mit_mean = (totals / len(loader)).tolist()
             validation = self._validation_metrics(val_set) if val_set is not None else None
             validation_mse = None if validation is None else validation["mse"]
             validation_rmse = None if validation is None else validation["rmse"]
@@ -325,9 +344,9 @@ class _BRITSBackend:
                 "epoch_seconds": validation_finished - epoch_started,
                 "epoch": epoch + 1,
                 "loss": mean_loss,
-                "reconstruction_loss": reconstruction_total / len(loader),
-                "consistency_loss": consistency_total / len(loader),
-                "mit_loss": mit_total / len(loader),
+                "reconstruction_loss": reconstruction_mean,
+                "consistency_loss": consistency_mean,
+                "mit_loss": mit_mean,
                 "validation_mse": validation_mse,
                 "validation_rmse": validation_rmse,
             }
@@ -368,7 +387,7 @@ class _BRITSBackend:
     def _predict_batch(self, values, depth=None):
         batch = torch.from_numpy(values).to(self.device)
         observed = torch.isfinite(batch).float()
-        imputation, _ = self.network(torch.nan_to_num(batch), observed)
+        imputation, _ = self.network(torch.nan_to_num(batch), observed, compute_loss=False)
         return imputation.cpu().numpy()
 
     def predict(self, dataset):
