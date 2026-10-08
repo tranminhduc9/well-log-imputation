@@ -40,6 +40,7 @@ class SAITSConfig(ModelConfig):
     ort_weight: float = 1.0
     mit_weight: float = 1.0
     mit_reduction: str = "segment"
+    independent_shuffle: bool = False
     min_delta: float = 1e-4
 
     def __post_init__(self) -> None:
@@ -133,7 +134,10 @@ class _SAITSBackend:
             observed = original_observed & np.isfinite(truth) & ~hidden
             if not np.any(hidden):
                 raise ValueError("SAITS requires at least one known value to mask for MIT training.")
-            loader = training_loader(truth, observed, hidden, self.config.batch_size)
+            loader = training_loader(
+                truth, observed, hidden, self.config.batch_size,
+                seed=self.config.seed + epoch if self.config.independent_shuffle else None,
+            )
             self.network.train()
             loss_total = 0.0
             for batch_inputs, batch_truth, batch_observed, batch_hidden in loader:
