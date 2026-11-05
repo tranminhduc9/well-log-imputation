@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import matplotlib
 matplotlib.use('Agg')
@@ -114,14 +115,39 @@ class NotebookTests(unittest.TestCase):
                      scenario=scenario, rmse=value + i, count=count)
                 for i, seed in enumerate(seeds)
                 for scenario, value, count in zip(scenarios, [1., 1., 1., 9.], [1, 20, 100, 256])]
-        pd.DataFrame(rows).to_csv(self.root / 'metrics_by_seed.csv', index=False)
         # Per-seed means are 3, 4, 5 despite very different gap lengths.
-        np.testing.assert_allclose(scope['validation_score'](self.root, 'brits'), [4., 1.])
+        np.testing.assert_allclose(scope['validation_score'](pd.DataFrame(rows), 'brits'), [4., 1.])
         for invalid, error in [(rows[:-1], AssertionError), (rows + [rows[0]], ValueError)]:
             with self.subTest(error=error.__name__):
-                pd.DataFrame(invalid).to_csv(self.root / 'metrics_by_seed.csv', index=False)
                 with self.assertRaises(error):
-                    scope['validation_score'](self.root, 'brits')
+                    scope['validation_score'](pd.DataFrame(invalid), 'brits')
+
+    def test_download_archives_include_only_requested_files(self):
+        train_files = {
+            'summary.csv', 'metrics_by_seed.csv', 'training_history.csv', 'epoch_timings.csv',
+            'inference_timings.csv', 'runtime_by_seed.csv', 'runtime_summary.csv',
+            'experiment_results.json', 'preprocessing_parameters.json', 'convergence_seed_912.png',
+            'brits/seed_912/model.pt', 'xgboost/seed_912/model.joblib', 'locf/seed_912/config.json',
+        }
+        tuning_files = {'search_trials.csv', 'best_model_settings.json', 'search_protocol.json'}
+        for notebook, folder, expected in [('train_models', 'models', train_files),
+                                            ('finetune_hyper', 'well-log-tuning', tuning_files)]:
+            with self.subTest(notebook=notebook):
+                output = self.root / folder
+                output.mkdir()
+                for name in expected | {'obsolete_details.csv'}:
+                    path = output / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b'test')
+                scope = dict(output_dir=output, OUTPUT_DIR=output, SEEDS=(912,),
+                             manifest={'runs': [{'artifact': name} for name in sorted(train_files)
+                                                if name.endswith(('.pt', '.joblib', '/config.json'))]},
+                             ZipFile=ZipFile, ZIP_DEFLATED=ZIP_DEFLATED,
+                             display=lambda *args: None, FileLink=lambda path: path)
+                exec(code_cell(notebook, 'result_files ='), scope)
+                self.assertEqual(scope['archive_path'], self.root / f'{folder}.zip')
+                with ZipFile(scope['archive_path']) as archive:
+                    self.assertEqual(set(archive.namelist()), expected)
 
     def test_visualization_uses_window_five_and_recorded_checkpoint_time(self):
         models = ['brits', 'saits', 'conv_saits']

@@ -143,19 +143,49 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(summary.loc[~learned, "rmse_std"].isna().all())
         self.assertEqual(set(summary["split"]), {"val", "test"})
 
+        expected_files = {
+            'summary.csv', 'metrics_by_seed.csv', 'training_history.csv',
+            'experiment_results.json', 'preprocessing_parameters.json',
+            *[Path(entry['artifact']).as_posix() for entry in result['runs']],
+        }
+        actual_files = {path.relative_to(output).as_posix() for path in output.rglob('*') if path.is_file()}
+        self.assertEqual(actual_files, expected_files)
+        self.assertEqual(set(summary['level']), {'overall', 'log'})
+
         artifact_paths = [entry["artifact"] for entry in result["runs"] if entry["model"] == "locf"]
-        (output / "training.log").write_text("OLD RUN SENTINEL\n")
         args.models, args.evaluate_test = ("locf",), False
         second = run_experiment(args, PROJECT_ROOT, settings)
         self.assertEqual(output, second)
         rerun = json.loads((second / "experiment_results.json").read_text())
         self.assertEqual(rerun["status"], "complete")
         self.assertEqual([entry["artifact"] for entry in rerun["runs"]], artifact_paths)
-        self.assertNotIn("OLD RUN SENTINEL", (second / "training.log").read_text())
         self.assertEqual(rerun["run_id"], "results")
         self.assertEqual(set(pd.read_csv(second / "summary.csv")["split"]), {"val"})
         self.assertTrue(pd.read_csv(second / "training_history.csv").empty)
 
+
+    def test_tuning_returns_validation_metrics_without_writing_files(self):
+        args = argparse.Namespace(models=("locf",), seeds=(129,),
+                                  data_root=self.data, output_dir=self.root / "tuning",
+                                  evaluate_test=False)
+        metrics = run_experiment(args, PROJECT_ROOT, {}, save_outputs=False)
+        self.assertFalse(args.output_dir.exists())
+        self.assertEqual(set(metrics["split"]), {"val"})
+        self.assertEqual(set(metrics["scenario"]), set(MISSING_SCENARIOS))
+        self.assertTrue(np.isfinite(metrics["rmse"]).all())
+        output = run_experiment(args, PROJECT_ROOT, {})
+        saved = pd.read_csv(output / "metrics_by_seed.csv")
+        pd.testing.assert_frame_equal(metrics, saved, check_dtype=False)
+        self.assertEqual({path.name for path in output.iterdir()}, {
+            "experiment_results.json", "preprocessing_parameters.json",
+            "metrics_by_seed.csv", "summary.csv", "training_history.csv", "locf",
+        })
+        self.assertEqual(set(pd.read_csv(output / "summary.csv")["level"]), {"overall", "log"})
+
+    def test_in_memory_tuning_rejects_test_evaluation(self):
+        args = argparse.Namespace(evaluate_test=True)
+        with self.assertRaisesRegex(ValueError, "must not evaluate test"):
+            run_experiment(args, PROJECT_ROOT, {}, save_outputs=False)
 
     def test_sample_std_and_duplicate_seed_rejection(self):
         row = {"model": "saits", "label": "SAITS", "split": "val", "scenario": "Single",

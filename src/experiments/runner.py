@@ -59,23 +59,27 @@ def _history_rows(model):
 
 def _save_results(output_dir, manifest, metrics, history):
     """Persist progress after each checkpoint and evaluation."""
+    if output_dir is None:
+        return
     save_json(output_dir / 'experiment_results.json', manifest)
     pd.DataFrame(metrics).to_csv(output_dir / 'metrics_by_seed.csv', index=False)
     history_columns = None if history else ['model', 'seed', 'epoch', 'loss']
     pd.DataFrame(history, columns=history_columns).to_csv(output_dir / 'training_history.csv', index=False)
     summary = summarize(metrics)
-    summary.to_csv(output_dir / 'summary_detailed.csv', index=False)
-    overall = summary if summary.empty else summary[summary['level'] == 'overall']
-    overall.to_csv(output_dir / 'summary.csv', index=False)
+    summary.to_csv(output_dir / 'summary.csv', index=False)
 
 
-def run_experiment(args, project_root, settings):
+def run_experiment(args, project_root, settings, *, save_outputs=True):
     """Run fixed settings; test starts only after all checkpoints are saved.
 
     Paths and device come directly from the notebook. With evaluate_test=False,
     test data is never opened. LOCF runs once because it has no learned weights.
     Results use args.output_dir directly; reruns overwrite files at stable paths.
+    With save_outputs=False, validation metrics are returned as a DataFrame and
+    no files are written. This mode is for tuning and forbids test evaluation.
     """
+    if not save_outputs and args.evaluate_test:
+        raise ValueError('In-memory tuning must not evaluate test data.')
     names, seeds = tuple(args.models), tuple(args.seeds)
     if not names or len(set(names)) != len(names) or set(names) - MODEL_CLASSES.keys():
         raise ValueError('Select unique supported model names.')
@@ -86,7 +90,8 @@ def run_experiment(args, project_root, settings):
 
     data_root = Path(args.data_root)
     output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if save_outputs:
+        output_dir.mkdir(parents=True, exist_ok=True)
     run_id = output_dir.name
     manifest = {
         'run_id': run_id, 'status': 'validating_data', 'models': names, 'seeds': seeds,
@@ -97,34 +102,36 @@ def run_experiment(args, project_root, settings):
     }
     metrics, history = [], []
 
-    handler = logging.FileHandler(output_dir / 'training.log', mode='w', encoding='utf-8')
-    handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s'))
+    result_dir = output_dir if save_outputs else None
     logger = logging.getLogger()
     previous_level = logger.level
-    logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     try:
         # 1. Read data and validate every configuration before training.
         preprocessing, data, metadata, hashes = load_and_check_data(data_root, args.evaluate_test)
-        manifest.update(data_sha256=hashes, provenance=source_info(project_root))
+        manifest.update(data_sha256=hashes)
+        if save_outputs:
+            manifest['provenance'] = source_info(project_root)
         manifest['split_counts'] = {
             split: {'segments': len(frame), 'wells': frame['WELL'].nunique()}
             for split, frame in metadata.items()
         }
-        save_json(output_dir / 'preprocessing_parameters.json', preprocessing)
+        if save_outputs:
+            save_json(output_dir / 'preprocessing_parameters.json', preprocessing)
         common = {'seq_len': preprocessing['segment_length'], 'n_features': len(preprocessing['log_columns'])}
         validation = {**next(iter(data['val'].values())), 'validation_scenarios': data['val']}
         for name in names:
             make_config(name, common, settings, seeds[0], args, output_dir)
         manifest['status'] = 'training'
-        _save_results(output_dir, manifest, metrics, history)
+        _save_results(result_dir, manifest, metrics, history)
 
         # 2. Train, save the selected checkpoint, then report validation metrics.
         for name in names:
             for seed in (seeds[:1] if name == 'locf' else seeds):
                 set_seed(seed)
                 folder = output_dir / name / f'seed_{seed}'
-                folder.mkdir(parents=True, exist_ok=True)
+                if save_outputs:
+                    folder.mkdir(parents=True, exist_ok=True)
                 config = make_config(name, common, settings, seed, args, folder)
                 model = MODEL_CLASSES[name](config)
                 LOGGER.info('%s | seed=%d | %s', LABELS[name], seed, asdict(config))
@@ -134,16 +141,19 @@ def run_experiment(args, project_root, settings):
                     started = synchronized_time(config.device)
                     model.fit(data['train'], monitor)
                     fit_seconds = synchronized_time(config.device) - started
-                artifact = _save_checkpoint(model, folder)
+                artifact = _save_checkpoint(model, folder) if save_outputs else None
                 manifest['runs'].append({
                     'model': name, 'label': LABELS[name], 'seed': seed, 'config': asdict(config),
                     'fit_seconds': fit_seconds, 'best_epoch': getattr(model.backend, 'best_epoch', None),
-                    'artifact': str(artifact.relative_to(output_dir)), 'sha256': sha256(artifact),
+                    'parameters': (sum(p.numel() for p in model.backend.network.parameters())
+                                   if name not in ('locf', 'xgboost') else (0 if name == 'locf' else None)),
+                    'artifact': str(artifact.relative_to(output_dir)) if artifact else None,
+                    'sha256': sha256(artifact) if artifact else None,
                 })
                 history.extend(_history_rows(model))
-                _save_results(output_dir, manifest, metrics, history)
+                _save_results(result_dir, manifest, metrics, history)
                 metrics.extend(evaluate_details(model, data['val'], preprocessing, name, seed, 'val'))
-                _save_results(output_dir, manifest, metrics, history)
+                _save_results(result_dir, manifest, metrics, history)
                 del model
                 gc.collect()
                 if torch.cuda.is_available():
@@ -152,29 +162,28 @@ def run_experiment(args, project_root, settings):
         # 3. Evaluate frozen checkpoints on test; test never selects a model.
         if args.evaluate_test:
             manifest['status'] = 'test_evaluation'
-            _save_results(output_dir, manifest, metrics, history)
+            _save_results(result_dir, manifest, metrics, history)
             for run in manifest['runs']:
                 model = restore_run({**run, 'artifact': str(output_dir / run['artifact'])},
                                     device=run['config']['device'] if run['model'] != 'locf' else 'cpu',
                                     batch_size=run['config']['batch_size'])
                 metrics.extend(evaluate_details(model, data['test'], preprocessing,
                                                 run['model'], run['seed'], 'test'))
-                _save_results(output_dir, manifest, metrics, history)
+                _save_results(result_dir, manifest, metrics, history)
                 del model
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
         manifest['status'] = 'complete'
-        _save_results(output_dir, manifest, metrics, history)
+        _save_results(result_dir, manifest, metrics, history)
     except Exception as error:
         # Keep completed checkpoints and the reason a partial run stopped.
         manifest.update(status='failed', error=f'{type(error).__name__}: {error}')
-        save_json(output_dir / 'experiment_results.json', manifest)
-        LOGGER.exception('Run failed; checkpoints preserved at %s', output_dir)
+        if save_outputs:
+            save_json(output_dir / 'experiment_results.json', manifest)
+        LOGGER.exception('Experiment failed')
         raise
     finally:
-        logger.removeHandler(handler)
-        handler.close()
         logger.setLevel(previous_level)
 
-    return output_dir
+    return output_dir if save_outputs else pd.DataFrame(metrics)
