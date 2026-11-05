@@ -7,3 +7,7 @@ xgboost>=2.0
 scipy
 joblib
 threadpoolctl
+matplotlib>=3.8
+nbformat>=5.10
+nbclient>=0.10
+ipykernel>=6.29

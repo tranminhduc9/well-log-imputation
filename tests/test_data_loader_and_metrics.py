@@ -9,10 +9,12 @@ import unittest
 
 import numpy as np
 import pandas as pd
+import torch
 
 from src.data.metrics import compute_imputation_metrics
 from src.data.loader import DataLoader
-from src.models.model import AbstractModel, ModelConfig
+from src.models.base import AbstractModel, ModelConfig
+from src.models.losses import masked_imputation_mae
 
 
 class _Backend:
@@ -102,6 +104,36 @@ class DataLoaderAndMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["count"], 2)
         self.assertEqual(metrics["mse"], 34.0)
         self.assertEqual(metrics["mape"], 100.0)
+
+
+class MetricValidationTests(unittest.TestCase):
+    def test_metrics_reject_invalid_predictions_shapes_and_masks(self):
+        truth, mask = np.array([1., 2.]), np.array([1, 1])
+        for invalid in (np.nan, np.inf, -np.inf):
+            with self.assertRaisesRegex(ValueError, "Non-finite"):
+                compute_imputation_metrics(truth, [1., invalid], mask)
+        with self.assertRaisesRegex(ValueError, "identical shapes"):
+            compute_imputation_metrics(truth, [1.], mask)
+        with self.assertRaisesRegex(ValueError, "binary"):
+            compute_imputation_metrics(truth, truth, [1, 2])
+        scored = compute_imputation_metrics(truth, [1., np.nan], [1, 0], include_mape=False)
+        self.assertEqual(scored["count"], 1)
+        self.assertNotIn("mape", scored)
+
+
+class MaskedLossTests(unittest.TestCase):
+    def test_mit_balances_segments_and_handles_empty_masks(self):
+        prediction = torch.tensor([[[2.], [9.]], [[4.], [4.]]], requires_grad=True)
+        mask = torch.tensor([[[1.], [0.]], [[1.], [1.]]])
+        truth = torch.zeros_like(prediction)
+        loss = masked_imputation_mae(prediction, truth, mask)
+        self.assertAlmostEqual(loss.item(), 3.)
+        self.assertAlmostEqual(masked_imputation_mae(prediction, truth, mask, "point").item(), 10/3, places=6)
+        loss.backward()
+        torch.testing.assert_close(prediction.grad, torch.tensor([[[.5], [0.]], [[.25], [.25]]]))
+        zero = masked_imputation_mae(prediction, truth, torch.zeros_like(mask))
+        self.assertEqual(zero.item(), 0.)
+        self.assertTrue(zero.requires_grad)
 
 
 if __name__ == "__main__":

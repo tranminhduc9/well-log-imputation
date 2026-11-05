@@ -5,16 +5,18 @@ import math
 
 import numpy as np
 
-from src.models.model import ModelConfig
+from src.models.base import ModelConfig
 
 
 @dataclass(frozen=True)
 class ConvSAITSConfig(ModelConfig):
     """Configuration for Conv-SAITS.
 
-    ``kernel_size=51`` follows the example in Equation (3) of the paper.  The
-    kernel is required to be odd so that temporal convolution preserves the
-    sequence length exactly.
+    The default encoder follows the supplied architecture: multi-scale
+    depthwise convolution with kernels (3, 7, 15), channel mixing and variable
+    mixing. Set ``multi_scale_conv=False`` for a single-kernel ablation;
+    ``kernel_size`` is used only in that mode. Kernels must be odd to preserve
+    sequence length.
     """
 
     n_layers: int = 2
@@ -23,7 +25,7 @@ class ConvSAITSConfig(ModelConfig):
     n_heads: int = 4
     encoder_channels: int = 16
     kernel_size: int = 51
-    multi_scale_conv: bool = False
+    multi_scale_conv: bool = True
     multi_scale_kernels: tuple[int, ...] = (3, 7, 15)
     conv_expansion: int = 2
     dropout: float = 0.1

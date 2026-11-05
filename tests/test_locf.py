@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from src.models.locf import LOCF
-from src.models.model import ModelConfig
+from src.models.base import ModelConfig
 
 
 class LOCFTests(unittest.TestCase):

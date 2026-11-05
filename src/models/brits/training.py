@@ -1,208 +1,19 @@
-"""Core BRITS model for multivariate well-log imputation."""
+"""Train BRITS with reconstruction, consistency and optional MIT losses."""
 
-from dataclasses import dataclass
 import logging
-import math
 import time
-
 import numpy as np
 import torch
 from torch import nn
-
-from src.models.model import AbstractModel, ModelConfig
 from src.models.losses import masked_imputation_mae
-from src.models._training import EarlyStopping, training_loader, validation_metrics, predict_batches, synchronized_time
+from src.models._training import (
+    EarlyStopping, training_loader, validation_metrics, predict_batches, synchronized_time,
+)
 from src.preprocessing.pipeline import BLOCK_LENGTHS, MISSING_SCENARIOS
+from .config import BRITSConfig
+from .network import BRITSNetwork
 
-
-LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class BRITSConfig(ModelConfig):
-    hidden_size: int = 64
-    consistency_weight: float = 0.1
-    mit_weight: float = 1.0
-    mit_reduction: str = "segment"
-    masking_strategy: str = "mixed"
-    masking_rate: float = 0.2
-    gradient_clip: float = 1.0
-    validation_metric: str = "rmse"
-    min_delta: float = 1e-4
-    # Keep PyPOTS-compatible optimization by default. Experiments can opt in
-    # to regularization (the final GeoLink notebook uses 1e-5).
-    weight_decay: float = 0.0
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.mit_reduction not in {"segment", "point"}:
-            raise ValueError("mit_reduction must be 'segment' or 'point'.")
-        if self.hidden_size <= 0:
-            raise ValueError("hidden_size must be positive.")
-        if self.consistency_weight < 0:
-            raise ValueError("consistency_weight must be non-negative.")
-        if self.mit_weight < 0:
-            raise ValueError("mit_weight must be non-negative.")
-        if self.masking_strategy not in {"mixed", "random", "none"}:
-            raise ValueError(
-                "masking_strategy must be 'mixed', 'random', or 'none'."
-            )
-        if not 0 < self.masking_rate < 1:
-            raise ValueError("masking_rate must be in (0, 1).")
-        if self.gradient_clip < 0:
-            raise ValueError("gradient_clip must be non-negative.")
-        if self.validation_metric not in {"mse", "rmse"}:
-            raise ValueError("validation_metric must be 'mse' or 'rmse'.")
-        if self.min_delta < 0:
-            raise ValueError("min_delta must be non-negative.")
-        if self.weight_decay < 0:
-            raise ValueError("weight_decay must be non-negative.")
-
-
-class TemporalDecay(nn.Module):
-    def __init__(self, input_size, output_size, diagonal=False):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(output_size, input_size))
-        self.bias = nn.Parameter(torch.empty(output_size))
-        self.register_buffer("mask", torch.eye(input_size) if diagonal else None)
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        """Match the parameter initialization used by PyPOTS."""
-
-        bound = 1.0 / math.sqrt(self.weight.size(0))
-        nn.init.uniform_(self.weight, -bound, bound)
-        nn.init.uniform_(self.bias, -bound, bound)
-
-    def forward(self, delta):
-        weight = self.weight if self.mask is None else self.weight * self.mask
-        return torch.exp(-torch.relu(nn.functional.linear(delta, weight, self.bias)))
-
-
-class FeatureRegression(nn.Module):
-    def __init__(self, n_features):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(n_features, n_features))
-        self.bias = nn.Parameter(torch.empty(n_features))
-        self.register_buffer("mask", 1 - torch.eye(n_features))
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        """Match the parameter initialization used by PyPOTS."""
-
-        bound = 1.0 / math.sqrt(self.weight.size(0))
-        nn.init.uniform_(self.weight, -bound, bound)
-        nn.init.uniform_(self.bias, -bound, bound)
-
-    def forward(self, values):
-        return nn.functional.linear(values, self.weight * self.mask, self.bias)
-
-
-class RITS(nn.Module):
-    """One directional recurrent imputation model."""
-
-    def __init__(self, n_features, hidden_size):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.rnn = nn.LSTMCell(n_features * 2, hidden_size)
-        self.history = nn.Linear(hidden_size, n_features)
-        self.feature = FeatureRegression(n_features)
-        self.decay_h = TemporalDecay(n_features, hidden_size)
-        self.decay_x = TemporalDecay(n_features, n_features, diagonal=True)
-        self.combine = nn.Linear(n_features * 2, n_features)
-
-    def forward(self, values, masks, deltas, compute_loss=True):
-        batch_size, sequence_length, _ = values.shape
-        hidden = values.new_zeros(batch_size, self.hidden_size)
-        cell = values.new_zeros(batch_size, self.hidden_size)
-        imputations = []
-        errors = []
-        # Recurrent steps consume [batch, features]. Make these slices
-        # contiguous once instead of striding through batch-major tensors.
-        values = values.transpose(0, 1).contiguous()
-        masks = masks.transpose(0, 1).contiguous()
-        deltas = deltas.transpose(0, 1).contiguous()
-        # These projections depend only on the masks/deltas, not recurrent
-        # state. Compute them for the entire sequence in three large calls.
-        decay_h = self.decay_h(deltas)
-        missing = 1 - masks
-        weights = torch.sigmoid(self.combine(torch.cat((self.decay_x(deltas), masks), -1)))
-        feature_weight = self.feature.weight * self.feature.mask
-
-        for step in range(sequence_length):
-            x = values[step]
-            mask = masks[step]
-            hidden = hidden * decay_h[step]
-            history = self.history(hidden)
-
-            completed = mask * x + missing[step] * history
-            feature = nn.functional.linear(completed, feature_weight, self.feature.bias)
-
-            weight = weights[step]
-            estimate = weight * feature + (1 - weight) * history
-            if compute_loss:
-                errors.append((torch.abs(history - x) + torch.abs(feature - x)
-                               + torch.abs(estimate - x)) * mask)
-
-            completed = mask * x + missing[step] * estimate
-            hidden, cell = self.rnn(torch.cat((completed, mask), 1), (hidden, cell))
-            imputations.append(completed)
-
-        loss = values.new_tensor(0.0)
-        if compute_loss:
-            # Preserve the original per-timestep normalization (not a pooled
-            # loss across the sequence), including empty-mask timesteps.
-            numerators = torch.stack(errors).sum(dim=(1, 2))
-            denominators = masks.sum(dim=(1, 2)) + 1e-5
-            loss = (numerators / denominators).sum() / (sequence_length * 3)
-        return torch.stack(imputations, 1), loss
-
-
-class BRITSNetwork(nn.Module):
-    def __init__(self, n_features, hidden_size, consistency_weight):
-        super().__init__()
-        self.forward_rits = RITS(n_features, hidden_size)
-        self.backward_rits = RITS(n_features, hidden_size)
-        self.consistency_weight = consistency_weight
-
-    def forward(self, values, masks, return_components=False, compute_loss=True):
-        forward, forward_loss = self.forward_rits(values, masks, _deltas(masks), compute_loss)
-
-        reverse_values = torch.flip(values, (1,))
-        reverse_masks = torch.flip(masks, (1,))
-        backward, backward_loss = self.backward_rits(
-            reverse_values,
-            reverse_masks,
-            _deltas(reverse_masks),
-            compute_loss,
-        )
-        backward = torch.flip(backward, (1,))
-
-        consistency = (torch.mean(torch.abs(forward - backward)) if compute_loss
-                       else values.new_tensor(0.0))
-        reconstruction = forward_loss + backward_loss
-        loss = reconstruction + self.consistency_weight * consistency
-        imputation = (forward + backward) / 2
-        if return_components:
-            return imputation, loss, reconstruction, consistency
-        return imputation, loss
-
-
-def _masked_mae(prediction, target, mask):
-    return torch.sum(torch.abs(prediction - target) * mask) / (torch.sum(mask) + 1e-5)
-
-
-def _deltas(masks):
-    """Unit depth steps since the latest observation for every log."""
-
-    deltas = torch.zeros_like(masks)
-    # The recurrence is distance from the most recent observation BEFORE the
-    # current step. cummax finds those positions in parallel for binary masks.
-    positions = torch.arange(masks.shape[1], device=masks.device).view(1, -1, 1)
-    observed_positions = torch.where(masks[:, :-1].bool(), positions[:, :-1], 0)
-    latest = observed_positions.cummax(dim=1).values
-    deltas[:, 1:] = (positions[:, 1:] - latest).to(masks.dtype)
-    return deltas
+LOGGER = logging.getLogger("src.models.brits")
 
 
 class _BRITSBackend:
@@ -392,15 +203,3 @@ class _BRITSBackend:
 
     def predict(self, dataset):
         return predict_batches(self.network, self._predict_batch, dataset, self.config.batch_size)
-
-
-class BRITS(AbstractModel):
-    """Bidirectional recurrent imputation for segmented well logs."""
-
-    name = "brits"
-
-    def __init__(self, config: BRITSConfig | None = None):
-        super().__init__(config or BRITSConfig())
-
-    def _build_backend(self):
-        return _BRITSBackend(self.config)

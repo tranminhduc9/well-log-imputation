@@ -1,102 +1,18 @@
-"""SAITS imputation adapted to the project's ``AbstractModel`` interface.
+"""ORT/MIT training, validation and batched inference for SAITS."""
 
-The architecture follows the two attention blocks and ORT/MIT objectives used
-by the well-log benchmark's PyPOTS SAITS model. This implementation only needs
-PyTorch, which is already a project dependency.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
 import logging
 import math
-
 import numpy as np
 import torch
-from torch import nn
-from torch.nn import functional as F
-
-from src.models.model import AbstractModel, ModelConfig
 from src.models.losses import masked_imputation_mae, masked_reconstruction_mae as _masked_mae
-from src.models._attention import AttentionLayer as _AttentionLayer, sinusoidal_position
 from src.models._training import (
     EarlyStopping, training_loader, validation_metrics, predict_batches, synchronized_time,
 )
 from src.preprocessing.pipeline import create_missing_mask
+from .config import SAITSConfig
+from .network import SAITSNetwork
 
-
-LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class SAITSConfig(ModelConfig):
-    n_layers: int = 2
-    d_model: int = 256
-    d_inner: int = 128
-    n_heads: int = 4
-    dropout: float = 0.1
-    attn_dropout: float = 0.1
-    diagonal_attention_mask: bool = True
-    ort_weight: float = 1.0
-    mit_weight: float = 1.0
-    mit_reduction: str = "segment"
-    independent_shuffle: bool = False
-    min_delta: float = 1e-4
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.mit_reduction not in {"segment", "point"}:
-            raise ValueError("mit_reduction must be 'segment' or 'point'.")
-        if self.n_layers <= 0 or self.d_model <= 0 or self.d_inner <= 0 or self.n_heads <= 0:
-            raise ValueError("SAITS layer, model, feed-forward, and head sizes must be positive.")
-        if self.d_model % self.n_heads:
-            raise ValueError("d_model must be divisible by n_heads.")
-        if self.diagonal_attention_mask and self.seq_len < 2:
-            raise ValueError("Diagonal attention requires at least two time steps.")
-        if not 0 <= self.dropout < 1 or not 0 <= self.attn_dropout < 1:
-            raise ValueError("SAITS dropout rates must be in [0, 1).")
-        if self.ort_weight < 0 or self.mit_weight < 0 or self.min_delta < 0:
-            raise ValueError("SAITS loss weights and min_delta must be non-negative.")
-        if self.ort_weight == self.mit_weight == 0:
-            raise ValueError("At least one SAITS loss weight must be positive.")
-
-
-class SAITSNetwork(nn.Module):
-    """Two DMSA blocks with attention-weighted combination of their estimates."""
-
-    def __init__(self, config: SAITSConfig) -> None:
-        super().__init__()
-        self.config = config
-        self.input_first = nn.Linear(2 * config.n_features, config.d_model)
-        self.input_second = nn.Linear(2 * config.n_features, config.d_model)
-        self.register_buffer("position", sinusoidal_position(config.seq_len, config.d_model))
-        self.embedding_dropout = nn.Dropout(config.dropout)
-        self.first_block = nn.ModuleList(_AttentionLayer(config) for _ in range(config.n_layers))
-        self.second_block = nn.ModuleList(_AttentionLayer(config) for _ in range(config.n_layers))
-        self.first_output = nn.Linear(config.d_model, config.n_features)
-        self.second_hidden = nn.Linear(config.d_model, config.n_features)
-        self.second_output = nn.Linear(config.n_features, config.n_features)
-        self.combine = nn.Linear(config.n_features + config.seq_len, config.n_features)
-
-    def forward(self, values: torch.Tensor, observed: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        first = self.embedding_dropout(self.input_first(torch.cat((values, observed), -1)) + self.position)
-        for layer in self.first_block:
-            first, _ = layer(first, self.config.diagonal_attention_mask)
-        estimate_first = self.first_output(first)
-
-        completed_first = observed * values + (1 - observed) * estimate_first
-        second = self.embedding_dropout(
-            self.input_second(torch.cat((completed_first, observed), -1)) + self.position
-        )
-        for layer in self.second_block:
-            second, attention = layer(second, self.config.diagonal_attention_mask)
-        estimate_second = self.second_output(F.relu(self.second_hidden(second)))
-
-        mean_attention = attention.mean(dim=1)
-        weights = torch.sigmoid(self.combine(torch.cat((observed, mean_attention), dim=-1)))
-        estimate = weights * estimate_first + (1 - weights) * estimate_second
-        imputation = observed * values + (1 - observed) * estimate
-        return imputation, estimate_first, estimate_second, estimate
+LOGGER = logging.getLogger("src.models.saits")
 
 
 class _SAITSBackend:
@@ -198,15 +114,3 @@ class _SAITSBackend:
 
     def predict(self, dataset):
         return predict_batches(self.network, self._predict_batch, dataset, self.config.batch_size)
-
-
-class SAITS(AbstractModel):
-    """Self-attention imputation for segmented well logs."""
-
-    name = "saits"
-
-    def __init__(self, config: SAITSConfig | None = None) -> None:
-        super().__init__(config or SAITSConfig())
-
-    def _build_backend(self) -> _SAITSBackend:
-        return _SAITSBackend(self.config)

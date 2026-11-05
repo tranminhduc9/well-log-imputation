@@ -1,8 +1,7 @@
-"""Last observation carried forward (LOCF) baseline."""
+"""LOCF: carry observations along depth; use zero for entirely missing logs."""
 
 import numpy as np
-
-from src.models.model import AbstractModel
+from src.models.base import AbstractModel
 
 
 class _LOCFBackend:

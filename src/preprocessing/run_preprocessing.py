@@ -2,6 +2,9 @@
 
 By default, this script reads LAS files from ``data/raw`` and writes the
 processed train/validation/test artifacts to ``data/processed``.
+
+Run from the repository root with:
+    python -m src.preprocessing.run_preprocessing
 """
 
 from __future__ import annotations
@@ -11,9 +14,11 @@ from pathlib import Path
 import sys
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.preprocessing.pipeline import run_pipeline_from_directory
 
 DEFAULT_RAW_DIRECTORY = PROJECT_ROOT / "data" / "raw"
 DEFAULT_PROCESSED_DIRECTORY = PROJECT_ROOT / "data" / "processed"
@@ -57,8 +62,6 @@ def main() -> None:
     arguments = parse_arguments()
     input_directory = arguments.input_dir.resolve()
     output_directory = arguments.output_dir.resolve()
-
-    from src.preprocessing.pipeline import run_pipeline_from_directory
 
     result = run_pipeline_from_directory(
         directory_path=input_directory,
