@@ -104,23 +104,25 @@ class ProtocolTests(unittest.TestCase):
         torch.set_num_threads(1)
         self.addCleanup(torch.set_num_threads, old_threads)
         args = argparse.Namespace(
-            models=("locf", "xgboost", "saits", "brits", "conv_saits"), seeds=(129, 219),
+            models=("locf", "xgboost", "saits", "brits", "flexlognet", "conv_saits"), seeds=(129, 219),
             data_root=self.data, output_dir=self.root / "results", evaluate_test=True,
             xgb_estimators=2,
             saits_epochs=1, saits_patience=1,
             brits_epochs=1, brits_patience=1,
+            flexlognet_epochs=1, flexlognet_patience=1,
             conv_saits_epochs=1, conv_saits_patience=1,
         )
         small = {"d_model": 8, "d_inner": 8, "n_heads": 2, "n_layers": 1, "batch_size": 2}
         settings = {"xgboost": {"n_jobs": 1, "max_depth": 2},
                     "saits": small,
                     "brits": {"hidden_size": 4, "batch_size": 2},
+                    "flexlognet": {"encoder_channels": (2, 4), "stats_hidden": 8, "batch_size": 3},
                     "conv_saits": {**small, "encoder_channels": 4, "kernel_size": 3}}
         original_evaluate = evaluate_details
         def assert_phase(*positional, **kwargs):
             if positional[-1] == "test":
                 manifest_path = self.root / "results" / "experiment_results.json"
-                self.assertEqual(len(json.loads(manifest_path.read_text())["runs"]), 9)
+                self.assertEqual(len(json.loads(manifest_path.read_text())["runs"]), 11)
             return original_evaluate(*positional, **kwargs)
 
         with patch("src.experiments.runner.evaluate_details", side_effect=assert_phase):
@@ -130,7 +132,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertNotIn(": NaN", result_text)
         result = json.loads(result_text)
         self.assertEqual(result["status"], "complete")
-        self.assertEqual(len(result["runs"]), 9)
+        self.assertEqual(len(result["runs"]), 11)
         self.assertFalse(Path(str(output) + ".zip").exists())  # Notebooks create the final ZIP.
         self.assertIn("src/experiments/runner.py", result["provenance"]["source_sha256"])
         for entry in result["runs"]:

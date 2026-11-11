@@ -69,7 +69,7 @@ class NotebookTests(unittest.TestCase):
                 config = make_config(name, {'seq_len': 256, 'n_features': 4},
                                      constants['MODEL_SETTINGS'], args.seeds[0], args, self.root)
                 self.assertEqual(config.seed, args.seeds[0])
-                if name in ('brits', 'saits', 'conv_saits'):
+                if name in ('brits', 'saits', 'flexlognet', 'conv_saits'):
                     self.assertEqual(config.epochs, constants['NEURAL_EPOCHS'])
                     self.assertEqual(config.patience, constants['NEURAL_PATIENCE'])
 

@@ -8,13 +8,15 @@ from src.models.xgboost import XGBoost, XGBoostConfig
 from src.models.brits import BRITS, BRITSConfig
 from src.models.saits import SAITS, SAITSConfig
 from src.models.conv_saits import ConvSAITS, ConvSAITSConfig
+from src.models.flexlognet import FlexLogNet, FlexLogNetConfig
 
 MODEL_CLASSES = {'locf': LOCF, 'xgboost': XGBoost, 'brits': BRITS,
-                 'saits': SAITS, 'conv_saits': ConvSAITS}
+                 'saits': SAITS, 'conv_saits': ConvSAITS, 'flexlognet': FlexLogNet}
 CONFIG_CLASSES = {'locf': ModelConfig, 'xgboost': XGBoostConfig, 'brits': BRITSConfig,
-                  'saits': SAITSConfig, 'conv_saits': ConvSAITSConfig}
+                  'saits': SAITSConfig, 'conv_saits': ConvSAITSConfig, 'flexlognet': FlexLogNetConfig}
 LABELS = {'locf': 'LOCF', 'xgboost': 'XGBoost', 'brits': 'BRITS + MIT',
-          'saits': 'SAITS (segment MIT)', 'conv_saits': 'Conv-SAITS (segment MIT)'}
+          'saits': 'SAITS (segment MIT)', 'conv_saits': 'Conv-SAITS (segment MIT)',
+          'flexlognet': 'FlexLogNet (adapted)'}
 
 
 def check_device(device):
