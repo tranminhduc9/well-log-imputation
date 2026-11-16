@@ -120,9 +120,9 @@ class ProtocolTests(unittest.TestCase):
                     "conv_saits": {**small, "encoder_channels": 4, "kernel_size": 3}}
         original_evaluate = evaluate_details
         def assert_phase(*positional, **kwargs):
-            if positional[-1] == "test":
-                manifest_path = self.root / "results" / "experiment_results.json"
-                self.assertEqual(len(json.loads(manifest_path.read_text())["runs"]), 11)
+            self.assertEqual(positional[-1], "test")
+            manifest_path = self.root / "results" / "experiment_results.json"
+            self.assertEqual(len(json.loads(manifest_path.read_text())["runs"]), 11)
             return original_evaluate(*positional, **kwargs)
 
         with patch("src.experiments.runner.evaluate_details", side_effect=assert_phase):
@@ -143,7 +143,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue((summary.loc[learned, "n_runs"] == 2).all())
         self.assertTrue(np.isfinite(summary.loc[learned, "rmse_std"]).all())
         self.assertTrue(summary.loc[~learned, "rmse_std"].isna().all())
-        self.assertEqual(set(summary["split"]), {"val", "test"})
+        self.assertEqual(set(summary["split"]), {"test"})
+        details = pd.read_csv(output / "metrics_by_seed.csv")
+        self.assertEqual(set(details["split"]), {"test"})
+        self.assertEqual(set(details["label"]), {"LOCF", "XGBoost", "SAITS", "BRITS", "FlexLogNet", "Conv-SAITS"})
+        history = pd.read_csv(output / "training_history.csv")
+        self.assertTrue(np.isfinite(history.loc[history['epoch'].notna(), 'validation_rmse']).all())
 
         expected_files = {
             'summary.csv', 'metrics_by_seed.csv', 'training_history.csv',

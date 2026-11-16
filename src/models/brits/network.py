@@ -71,32 +71,41 @@ class RITS(nn.Module):
         cell = values.new_zeros(batch_size, self.hidden_size)
         imputations = []
         loss = values.new_zeros(())
+        gamma_h = self.decay_h(deltas)
+        weights = torch.sigmoid(self.combine(torch.cat((self.decay_x(deltas), masks), -1)))
+        feature_weight = self.feature.weight * self.feature.mask
+        histories, features, estimates = [], [], []
 
         for step in range(sequence_length):
-            x, mask, delta = values[:, step], masks[:, step], deltas[:, step]
+            x, mask = values[:, step], masks[:, step]
 
             # 1. Older observations contribute less after a long gap.
-            hidden = hidden * self.decay_h(delta)
+            hidden = hidden * gamma_h[:, step]
             history = self.history(hidden)
 
             # 2. Fill from history, then predict from the other logs.
             completed = mask * x + (1 - mask) * history
-            feature = self.feature(completed)
+            feature = nn.functional.linear(completed, feature_weight, self.feature.bias)
 
             # 3. Learn how much to trust the two estimates.
-            weight = torch.sigmoid(self.combine(torch.cat((self.decay_x(delta), mask), -1)))
+            weight = weights[:, step]
             estimate = weight * feature + (1 - weight) * history
             if compute_loss:
-                loss = loss + sum(_masked_mae(part, x, mask)
-                                  for part in (history, feature, estimate))
+                histories.append(history)
+                features.append(feature)
+                estimates.append(estimate)
 
             # 4. Keep observed values and feed the filled sample to the LSTM.
             completed = mask * x + (1 - mask) * estimate
             hidden, cell = self.rnn(torch.cat((completed, mask), 1), (hidden, cell))
             imputations.append(completed)
 
-        # Equal weight for the three estimates and for each depth step.
-        return torch.stack(imputations, 1), loss / (sequence_length * 3)
+        if compute_loss:
+            predictions = torch.stack((torch.stack(histories, 1), torch.stack(features, 1),
+                                       torch.stack(estimates, 1)))
+            errors = (torch.abs(predictions - values.unsqueeze(0)) * masks.unsqueeze(0)).sum((1, 3))
+            loss = (errors / (masks.sum((0, 2)) + 1e-5)).mean()
+        return torch.stack(imputations, 1), loss
 
 
 class BRITSNetwork(nn.Module):
@@ -139,7 +148,7 @@ def _masked_mae(prediction, target, mask):
 def _deltas(masks):
     """Unit depth steps since the latest observation for every log."""
 
-    deltas = torch.zeros_like(masks)
-    for step in range(1, masks.shape[1]):
-        deltas[:, step] = 1 + (1 - masks[:, step - 1]) * deltas[:, step - 1]
-    return deltas
+    steps = torch.arange(masks.shape[1], device=masks.device).reshape(1, -1, 1)
+    observations = torch.where(masks.bool(), steps, 0).cummax(dim=1).values
+    previous = torch.cat((torch.zeros_like(observations[:, :1]), observations[:, :-1]), dim=1)
+    return (steps - previous).to(masks.dtype)

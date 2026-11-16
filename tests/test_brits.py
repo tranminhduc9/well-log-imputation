@@ -4,9 +4,11 @@ from copy import deepcopy
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
-from src.models.brits import BRITSNetwork, _deltas, _masked_mae
+from src.models._training import validation_metrics
+from src.models.brits import BRITS, BRITSConfig, BRITSNetwork, _deltas, _masked_mae
 
 
 def reference_deltas(masks):
@@ -53,6 +55,15 @@ def reference_network(network, values, masks):
 
 
 class BRITSNetworkTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+
+    @classmethod
+    def tearDownClass(cls):
+        torch.set_num_threads(cls.threads)
+
     def test_deltas_match_recurrence(self):
         torch.manual_seed(23)
         for length in (1, 7, 256):
@@ -65,12 +76,13 @@ class BRITSNetworkTests(unittest.TestCase):
     def test_predictions_losses_and_gradients_match_reference(self):
         devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
         for device in devices:
-            for dtype in (torch.float32, torch.float64):
-                with self.subTest(device=device, dtype=dtype):
+            for dtype, length in ((torch.float32, 11), (torch.float64, 11),
+                                  (torch.float32, 256), (torch.float64, 256)):
+                with self.subTest(device=device, dtype=dtype, length=length):
                     torch.manual_seed(23)
                     network_under_test = BRITSNetwork(4, 8, .1).to(device=device, dtype=dtype)
                     reference = deepcopy(network_under_test)
-                    masks = (torch.rand(3, 11, 4, device=device) > .3).to(dtype)
+                    masks = (torch.rand(3, length, 4, device=device) > .3).to(dtype)
                     masks[:, 3] = 0  # A whole timestep with an empty denominator.
                     masks[:, :, 0] = 0  # An entirely missing log.
                     values = (torch.randn_like(masks) * masks).requires_grad_()
@@ -103,6 +115,28 @@ class BRITSNetworkTests(unittest.TestCase):
                     actual, loss = network(values, masks, compute_loss=False)
             torch.testing.assert_close(actual, expected)
             self.assertEqual(loss.item(), 0.)
+
+    def test_larger_validation_batches_preserve_all_scenario_scores(self):
+        config = BRITSConfig(seq_len=128, n_features=4, hidden_size=8,
+                             batch_size=2, validation_batch_size=5, device="cpu")
+        backend = BRITS(config).backend
+        truth = np.random.default_rng(42).normal(size=(7, 128, 4)).astype(np.float32)
+        scenarios = {}
+        for name, length in (("Single", 1), ("Block-20", 20), ("Block-100", 100), ("Entire-Log", 128)):
+            mask = np.zeros_like(truth, dtype=bool)
+            mask[:, :length, 0] = True
+            scenarios[name] = dict(X=np.where(mask, np.nan, truth), X_intact=truth, indicating_mask=mask)
+        dataset = dict(validation_scenarios=scenarios)
+        expected = validation_metrics(dataset, backend.predict, config.batch_size, "BRITS")
+        actual = backend._validation_metrics(dataset)
+        for name in ("mse", "rmse"):
+            self.assertAlmostEqual(actual[name], expected[name], places=6)
+            for scenario in scenarios:
+                self.assertAlmostEqual(actual["by_scenario"][scenario][name],
+                                       expected["by_scenario"][scenario][name], places=6)
+        for invalid in (0, -1, 1.5):
+            with self.subTest(validation_batch_size=invalid), self.assertRaises(ValueError):
+                BRITSConfig(validation_batch_size=invalid)
 
 
 if __name__ == "__main__":

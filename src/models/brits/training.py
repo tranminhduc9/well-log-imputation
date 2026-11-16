@@ -188,7 +188,13 @@ class _BRITSBackend:
         stopping.restore(self.network)
 
     def _validation_metrics(self, dataset):
-        return validation_metrics(dataset, self.predict, self.config.batch_size, "BRITS")
+        batch_size = self.config.validation_batch_size
+
+        def predict(inputs):
+            return predict_batches(self.network, self._predict_batch, inputs, batch_size)
+
+        with torch.inference_mode():
+            return validation_metrics(dataset, predict, batch_size, "BRITS")
 
     def _validation_rmse(self, dataset):
         """Retain the previous helper API for callers that only need RMSE."""

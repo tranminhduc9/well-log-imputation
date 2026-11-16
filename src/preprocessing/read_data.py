@@ -7,6 +7,18 @@ import lasio
 import pandas as pd
 
 
+def _decoded_frame(las: lasio.LASFile) -> pd.DataFrame:
+    """Decode GeoLink's additional -999 curve sentinel after LAS NULL parsing.
+
+    The first column is the depth index and is deliberately left untouched.
+    Other negative values (for example apparent neutron porosity) are preserved.
+    """
+    frame = las.df().reset_index()
+    curve_columns = frame.columns[1:]
+    frame[curve_columns] = frame[curve_columns].replace(-999.0, float("nan"))
+    return frame
+
+
 def read_data(file_path: str | Path) -> pd.DataFrame:
     """
     Read raw well-log data from a las file.
@@ -16,7 +28,8 @@ def read_data(file_path: str | Path) -> pd.DataFrame:
 
     Returns:
         DataFrame containing the depth and well-log curves. LAS null values are
-        represented as ``NaN``.
+        and GeoLink's additional ``-999.0`` curve sentinel are represented as
+        ``NaN``. Depth values and other negative measurements are retained.
 
     Raises:
         FileNotFoundError: If ``file_path`` does not point to a file.
@@ -26,7 +39,7 @@ def read_data(file_path: str | Path) -> pd.DataFrame:
         raise FileNotFoundError(f"LAS file not found: {path}")
 
     las = lasio.read(path)
-    return las.df().reset_index()
+    return _decoded_frame(las)
 
 
 def extract_metadata(file_path: str | Path) -> dict[str, Any]:
@@ -97,7 +110,7 @@ def read_data_directory(directory_path: str | Path) -> pd.DataFrame:
     frames = []
     for path in las_files:
         las = lasio.read(path)
-        frame = las.df().reset_index()
+        frame = _decoded_frame(las)
         well_item = next(
             (item for item in las.well if item.mnemonic.upper() == "WELL"), None
         )

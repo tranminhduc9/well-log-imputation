@@ -7,6 +7,7 @@ from src.models.base import ModelConfig
 @dataclass(frozen=True)
 class BRITSConfig(ModelConfig):
     hidden_size: int = 64
+    validation_batch_size: int = 256
     consistency_weight: float = 0.1
     mit_weight: float = 1.0
     mit_reduction: str = "segment"
@@ -23,6 +24,8 @@ class BRITSConfig(ModelConfig):
             raise ValueError("mit_reduction must be 'segment' or 'point'.")
         if self.hidden_size <= 0:
             raise ValueError("hidden_size must be positive.")
+        if type(self.validation_batch_size) is not int or self.validation_batch_size <= 0:
+            raise ValueError("validation_batch_size must be a positive integer.")
         if self.consistency_weight < 0:
             raise ValueError("consistency_weight must be non-negative.")
         if self.mit_weight < 0:

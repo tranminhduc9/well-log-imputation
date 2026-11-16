@@ -77,6 +77,8 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
     Results use args.output_dir directly; reruns overwrite files at stable paths.
     With save_outputs=False, validation metrics are returned as a DataFrame and
     no files are written. This mode is for tuning and forbids test evaluation.
+    Test runs save test evaluation metrics only; validation still selects the
+    checkpoint and remains in the per-epoch training history.
     """
     if not save_outputs and args.evaluate_test:
         raise ValueError('In-memory tuning must not evaluate test data.')
@@ -96,6 +98,7 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
     manifest = {
         'run_id': run_id, 'status': 'validating_data', 'models': names, 'seeds': seeds,
         'data_root': str(data_root.resolve()), 'evaluate_test': args.evaluate_test, 'runs': [],
+        'evaluation_splits': ['test'] if args.evaluate_test else ['val'],
         'selection': 'Mean validation RMSE across four scenarios; no seed selection.',
         'std_definition': 'Sample standard deviation across seeds (ddof=1).',
         'test_role': 'Development test split; not an untouched holdout.',
@@ -125,7 +128,7 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
         manifest['status'] = 'training'
         _save_results(result_dir, manifest, metrics, history)
 
-        # 2. Train, save the selected checkpoint, then report validation metrics.
+        # 2. Train and save the validation-selected checkpoint.
         for name in names:
             for seed in (seeds[:1] if name == 'locf' else seeds):
                 set_seed(seed)
@@ -152,8 +155,9 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
                 })
                 history.extend(_history_rows(model))
                 _save_results(result_dir, manifest, metrics, history)
-                metrics.extend(evaluate_details(model, data['val'], preprocessing, name, seed, 'val'))
-                _save_results(result_dir, manifest, metrics, history)
+                if not args.evaluate_test:
+                    metrics.extend(evaluate_details(model, data['val'], preprocessing, name, seed, 'val'))
+                    _save_results(result_dir, manifest, metrics, history)
                 del model
                 gc.collect()
                 if torch.cuda.is_available():

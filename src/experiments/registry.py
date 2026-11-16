@@ -14,9 +14,8 @@ MODEL_CLASSES = {'locf': LOCF, 'xgboost': XGBoost, 'brits': BRITS,
                  'saits': SAITS, 'conv_saits': ConvSAITS, 'flexlognet': FlexLogNet}
 CONFIG_CLASSES = {'locf': ModelConfig, 'xgboost': XGBoostConfig, 'brits': BRITSConfig,
                   'saits': SAITSConfig, 'conv_saits': ConvSAITSConfig, 'flexlognet': FlexLogNetConfig}
-LABELS = {'locf': 'LOCF', 'xgboost': 'XGBoost', 'brits': 'BRITS + MIT',
-          'saits': 'SAITS (segment MIT)', 'conv_saits': 'Conv-SAITS (segment MIT)',
-          'flexlognet': 'FlexLogNet (adapted)'}
+LABELS = {'locf': 'LOCF', 'xgboost': 'XGBoost', 'brits': 'BRITS',
+          'saits': 'SAITS', 'conv_saits': 'Conv-SAITS', 'flexlognet': 'FlexLogNet'}
 
 
 def check_device(device):

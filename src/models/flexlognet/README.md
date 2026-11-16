@@ -34,5 +34,5 @@ the experiment runner's deterministic setting.
 - Constant/single-observation logs use unit scale. Predicted scales use softplus
   to stay positive. Inference preserves all observed values.
 - Checkpoints are selected by the same mean validation RMSE over four scenarios
-  as the other neural models. Results are labeled `FlexLogNet (adapted)`; this is
+  as the other neural models. Results are labeled `FlexLogNet`; this adaptation is
   not a reproduction of the paper's published scores.
