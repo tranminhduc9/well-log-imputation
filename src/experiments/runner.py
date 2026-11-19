@@ -4,6 +4,7 @@ from dataclasses import asdict
 import gc
 import logging
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import joblib
 import pandas as pd
@@ -11,7 +12,7 @@ import torch
 
 from src.models._training import synchronized_time
 from .data import load_and_check_data
-from .evaluation import evaluate_details, summarize
+from .evaluation import evaluate_details, format_test_comparison, summarize, summarize_test_models
 from .inference import restore_run
 from .registry import MODEL_CLASSES, LABELS, make_config
 from .utils import save_json, set_seed, sha256, source_info
@@ -69,19 +70,28 @@ def _save_results(output_dir, manifest, metrics, history):
     summary.to_csv(output_dir / 'summary.csv', index=False)
 
 
-def run_experiment(args, project_root, settings, *, save_outputs=True):
-    """Run fixed settings; test starts only after all checkpoints are saved.
+def run_experiment(args, project_root, settings, *, save_outputs=True, summary_only=False,
+                   return_history=False):
+    """Run fixed settings, selecting model weights on validation before scoring test.
 
     Paths and device come directly from the notebook. With evaluate_test=False,
     test data is never opened. LOCF runs once because it has no learned weights.
     Results use args.output_dir directly; reruns overwrite files at stable paths.
     With save_outputs=False, validation metrics are returned as a DataFrame and
     no files are written. This mode is for tuning and forbids test evaluation.
+    In tuning mode, return_history=True returns (validation metrics, training history).
+    With summary_only=True, each fitted model is scored in memory and the only
+    output is the test comparison CSV. The return value is the CSV path.
     Test runs save test evaluation metrics only; validation still selects the
     checkpoint and remains in the per-epoch training history.
     """
     if not save_outputs and args.evaluate_test:
         raise ValueError('In-memory tuning must not evaluate test data.')
+    if return_history and (save_outputs or summary_only):
+        raise ValueError('Returning training history requires in-memory tuning.')
+    if summary_only and not args.evaluate_test:
+        raise ValueError('The test comparison requires test evaluation.')
+    save_artifacts = save_outputs and not summary_only
     names, seeds = tuple(args.models), tuple(args.seeds)
     if not names or len(set(names)) != len(names) or set(names) - MODEL_CLASSES.keys():
         raise ValueError('Select unique supported model names.')
@@ -92,7 +102,7 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
 
     data_root = Path(args.data_root)
     output_dir = Path(args.output_dir).resolve()
-    if save_outputs:
+    if save_artifacts:
         output_dir.mkdir(parents=True, exist_ok=True)
     run_id = output_dir.name
     manifest = {
@@ -105,7 +115,7 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
     }
     metrics, history = [], []
 
-    result_dir = output_dir if save_outputs else None
+    result_dir = output_dir if save_artifacts else None
     logger = logging.getLogger()
     previous_level = logger.level
     logger.setLevel(logging.INFO)
@@ -113,13 +123,13 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
         # 1. Read data and validate every configuration before training.
         preprocessing, data, metadata, hashes = load_and_check_data(data_root, args.evaluate_test)
         manifest.update(data_sha256=hashes)
-        if save_outputs:
+        if save_artifacts:
             manifest['provenance'] = source_info(project_root)
         manifest['split_counts'] = {
             split: {'segments': len(frame), 'wells': frame['WELL'].nunique()}
             for split, frame in metadata.items()
         }
-        if save_outputs:
+        if save_artifacts:
             save_json(output_dir / 'preprocessing_parameters.json', preprocessing)
         common = {'seq_len': preprocessing['segment_length'], 'n_features': len(preprocessing['log_columns'])}
         validation = {**next(iter(data['val'].values())), 'validation_scenarios': data['val']}
@@ -128,12 +138,12 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
         manifest['status'] = 'training'
         _save_results(result_dir, manifest, metrics, history)
 
-        # 2. Train and save the validation-selected checkpoint.
+        # 2. Train and select weights on validation.
         for name in names:
             for seed in (seeds[:1] if name == 'locf' else seeds):
                 set_seed(seed)
                 folder = output_dir / name / f'seed_{seed}'
-                if save_outputs:
+                if save_artifacts:
                     folder.mkdir(parents=True, exist_ok=True)
                 config = make_config(name, common, settings, seed, args, folder)
                 model = MODEL_CLASSES[name](config)
@@ -144,7 +154,7 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
                     started = synchronized_time(config.device)
                     model.fit(data['train'], monitor)
                     fit_seconds = synchronized_time(config.device) - started
-                artifact = _save_checkpoint(model, folder) if save_outputs else None
+                artifact = _save_checkpoint(model, folder) if save_artifacts else None
                 manifest['runs'].append({
                     'model': name, 'label': LABELS[name], 'seed': seed, 'config': asdict(config),
                     'fit_seconds': fit_seconds, 'best_epoch': getattr(model.backend, 'best_epoch', None),
@@ -153,10 +163,12 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
                     'artifact': str(artifact.relative_to(output_dir)) if artifact else None,
                     'sha256': sha256(artifact) if artifact else None,
                 })
-                history.extend(_history_rows(model))
+                if save_artifacts or return_history:
+                    history.extend(_history_rows(model))
                 _save_results(result_dir, manifest, metrics, history)
-                if not args.evaluate_test:
-                    metrics.extend(evaluate_details(model, data['val'], preprocessing, name, seed, 'val'))
+                if summary_only or not args.evaluate_test:
+                    split = 'test' if summary_only else 'val'
+                    metrics.extend(evaluate_details(model, data[split], preprocessing, name, seed, split))
                     _save_results(result_dir, manifest, metrics, history)
                 del model
                 gc.collect()
@@ -164,7 +176,7 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
                     torch.cuda.empty_cache()
 
         # 3. Evaluate frozen checkpoints on test; test never selects a model.
-        if args.evaluate_test:
+        if args.evaluate_test and save_artifacts:
             manifest['status'] = 'test_evaluation'
             _save_results(result_dir, manifest, metrics, history)
             for run in manifest['runs']:
@@ -180,14 +192,35 @@ def run_experiment(args, project_root, settings, *, save_outputs=True):
                     torch.cuda.empty_cache()
         manifest['status'] = 'complete'
         _save_results(result_dir, manifest, metrics, history)
+        if summary_only:
+            summary = summarize_test_models(metrics, manifest['runs'])
+            comparison = format_test_comparison(summary, data['test'])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output = output_dir / 'test_model_comparison.csv'
+            with NamedTemporaryFile(dir=output_dir, suffix='.tmp', delete=False) as stream:
+                temporary = Path(stream.name)
+            try:
+                comparison.to_csv(temporary, index=False, encoding='utf-8-sig')
+                temporary.replace(output)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return output
     except Exception as error:
         # Keep completed checkpoints and the reason a partial run stopped.
         manifest.update(status='failed', error=f'{type(error).__name__}: {error}')
-        if save_outputs:
+        if save_artifacts:
             save_json(output_dir / 'experiment_results.json', manifest)
         LOGGER.exception('Experiment failed')
         raise
     finally:
         logger.setLevel(previous_level)
 
-    return output_dir if save_outputs else pd.DataFrame(metrics)
+    if save_outputs:
+        return output_dir
+    scores = pd.DataFrame(metrics)
+    if not return_history:
+        return scores
+    curves = pd.DataFrame(history)
+    if 'log_index' in curves:
+        curves['log'] = curves['log_index'].map(dict(enumerate(preprocessing['log_columns'])))
+    return scores, curves

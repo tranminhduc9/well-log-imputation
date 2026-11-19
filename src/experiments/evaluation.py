@@ -57,3 +57,39 @@ def summarize(rows):
     statistics.columns = [f'{metric}_{stat}' for metric, stat in statistics.columns]
     counts = grouped.agg(n_runs=('seed', 'size'), count=('count', 'first'))
     return counts.join(statistics).reset_index()
+
+
+def summarize_test_models(rows, runs):
+    """Return one test row per model and scenario, with MAPE aggregated per seed."""
+    frame = pd.DataFrame(rows)
+    overall = frame.query("split == 'test' and level == 'overall' and units == 'normalized'")
+    logs = frame.query("split == 'test' and level == 'log' and units == 'original' "
+                       "and group in ['GR', 'RHOB', 'DTC']")
+    keys = ['model', 'scenario', 'seed']
+    mape = logs.groupby(keys)['mape'].mean() if 'mape' in logs else None
+    overall = overall.drop(columns='mape', errors='ignore')
+    if mape is not None:
+        overall = overall.join(mape, on=keys)
+    summary = summarize(overall.to_dict('records'))
+    parameters = pd.DataFrame(runs).groupby('model')['parameters'].first().astype('Int64')
+    summary['parameters'] = summary['model'].map(parameters)
+    columns = ['label', 'scenario', 'n_runs', 'parameters']
+    columns += [f'{metric}_{stat}' for metric in ('rmse', 'mae', 'mape', 'mse', 'r2')
+                for stat in ('mean', 'std')]
+    return summary.reindex(columns=columns).rename(columns={'label': 'model', 'n_runs': 'n_seeds'})
+
+
+def format_test_comparison(summary, scenarios):
+    """Format one CSV cell per metric and group rows by scenario."""
+    ordered = summary.sort_values(
+        'scenario', key=lambda values: pd.Categorical(values, categories=list(scenarios)),
+        kind='stable',
+    )
+    table = ordered[['model', 'scenario']].rename(columns={'model': 'Mô hình', 'scenario': 'Kịch bản'})
+    for metric, label in [('rmse', 'RMSE'), ('mae', 'MAE'), ('mape', 'MAPE (%)'),
+                          ('mse', 'MSE'), ('r2', 'R²')]:
+        mean = ordered[f'{metric}_mean'].map('{:.4f}'.format, na_action='ignore').astype('string')
+        std = ordered[f'{metric}_std'].map('{:.4f}'.format, na_action='ignore').astype('string')
+        table[label] = mean.where(std.isna(), mean + ' ± ' + std)
+    table['Số tham số'] = ordered['parameters']
+    return table

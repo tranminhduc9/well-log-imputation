@@ -3,7 +3,7 @@
 from .config import ConvSAITSConfig
 from .model import (
     DecoupledFeatureEncoder, DiagonallyMaskedAttentionLayer,
-    ConvSAITS, ConvSAITSNetwork, CONV_SAITS, _ConvSAITSBackend,
+    ConvSAITS, ConvSAITSNetwork, CONV_SAITS,
 )
 from .ablation import CrossLogAttention, ConditionalLogDecoder, gap_features
 

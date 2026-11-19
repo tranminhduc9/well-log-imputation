@@ -10,7 +10,6 @@ from src.models._training import (
     EarlyStopping, training_loader, validation_metrics, predict_batches, synchronized_time,
 )
 from src.preprocessing.pipeline import BLOCK_LENGTHS, MISSING_SCENARIOS
-from .config import BRITSConfig
 from .network import BRITSNetwork
 
 LOGGER = logging.getLogger("src.models.brits")

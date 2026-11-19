@@ -1,7 +1,6 @@
 """Read raw well-log data from LAS files."""
 
 from pathlib import Path
-from typing import Any
 
 import lasio
 import pandas as pd
@@ -27,7 +26,7 @@ def read_data(file_path: str | Path) -> pd.DataFrame:
         file_path: Path to the LAS file containing well-log data.
 
     Returns:
-        DataFrame containing the depth and well-log curves. LAS null values are
+        DataFrame containing the depth and well-log curves. LAS null values
         and GeoLink's additional ``-999.0`` curve sentinel are represented as
         ``NaN``. Depth values and other negative measurements are retained.
 
@@ -40,45 +39,6 @@ def read_data(file_path: str | Path) -> pd.DataFrame:
 
     las = lasio.read(path)
     return _decoded_frame(las)
-
-
-def extract_metadata(file_path: str | Path) -> dict[str, Any]:
-    """Extract all header metadata from a LAS file.
-
-    Args:
-        file_path: Path to the LAS file containing well-log data.
-
-    Returns:
-        Metadata from the Version, Well, Curve, Parameter and Other sections.
-        Each header item retains its value, unit and description.
-
-    Raises:
-        FileNotFoundError: If ``file_path`` does not point to a file.
-    """
-    path = Path(file_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"LAS file not found: {path}")
-
-    las = lasio.read(path, ignore_data=True)
-
-    metadata = {}
-    for section_name, section in (
-        ("version", las.version),
-        ("well", las.well),
-        ("curves", las.curves),
-        ("parameters", las.params),
-    ):
-        metadata[section_name] = {
-            item.mnemonic: {
-                "value": item.value,
-                "unit": item.unit,
-                "description": item.descr,
-            }
-            for item in section
-        }
-
-    metadata["other"] = las.other
-    return metadata
 
 
 def read_data_directory(directory_path: str | Path) -> pd.DataFrame:

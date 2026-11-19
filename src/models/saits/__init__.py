@@ -3,6 +3,5 @@
 from .config import SAITSConfig
 from .network import SAITSNetwork
 from .model import SAITS
-from .training import _SAITSBackend
 
 __all__ = ["SAITS", "SAITSConfig", "SAITSNetwork"]

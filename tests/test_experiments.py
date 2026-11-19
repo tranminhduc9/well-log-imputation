@@ -13,7 +13,7 @@ import torch
 
 from src.experiments.runner import run_experiment
 from src.experiments.data import load_and_check_data
-from src.experiments.evaluation import evaluate_details, summarize
+from src.experiments.evaluation import evaluate_details, summarize, summarize_test_models
 from src.preprocessing.pipeline import MISSING_SCENARIOS, BLOCK_LENGTHS
 
 
@@ -159,6 +159,27 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(actual_files, expected_files)
         self.assertEqual(set(summary['level']), {'overall', 'log'})
 
+        args.output_dir = self.root / 'comparison'
+        comparison_path = run_experiment(args, PROJECT_ROOT, settings, summary_only=True)
+        self.assertEqual(comparison_path, args.output_dir / 'test_model_comparison.csv')
+        self.assertEqual(list(args.output_dir.rglob('*')), [comparison_path])
+        comparison = pd.read_csv(comparison_path, keep_default_na=False, dtype=str)
+        self.assertEqual(list(comparison.columns),
+                         ['Mô hình', 'Kịch bản', 'RMSE', 'MAE', 'MAPE (%)', 'MSE', 'R²', 'Số tham số'])
+        self.assertEqual(comparison['Kịch bản'].tolist(),
+                         [scenario for scenario in MISSING_SCENARIOS for _ in args.models])
+        comparison = comparison.set_index(['Mô hình', 'Kịch bản'])
+        overall = summary.query("level == 'overall'").set_index(['label', 'scenario'])
+        for key, row in overall.iterrows():
+            expected = f"{row['rmse_mean']:.4f}"
+            if pd.notna(row['rmse_std']):
+                expected += f" ± {row['rmse_std']:.4f}"
+            self.assertEqual(comparison.loc[key, 'RMSE'], expected)
+        self.assertTrue(comparison.loc['LOCF', 'Số tham số'].eq('0').all())
+        self.assertTrue(comparison.loc['XGBoost', 'Số tham số'].eq('').all())
+        self.assertTrue((comparison.loc['Conv-SAITS', 'Số tham số'].astype(int) > 0).all())
+        args.output_dir = output
+
         artifact_paths = [entry["artifact"] for entry in result["runs"] if entry["model"] == "locf"]
         args.models, args.evaluate_test = ("locf",), False
         second = run_experiment(args, PROJECT_ROOT, settings)
@@ -194,6 +215,18 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not evaluate test"):
             run_experiment(args, PROJECT_ROOT, {}, save_outputs=False)
 
+    def test_in_memory_tuning_returns_real_boosting_curves_without_writing_files(self):
+        args = argparse.Namespace(models=('xgboost',), seeds=(129,), data_root=self.data,
+                                  output_dir=self.root / 'tuning', evaluate_test=False,
+                                  xgb_estimators=2)
+        scores, curves = run_experiment(args, PROJECT_ROOT, {'xgboost': {'n_jobs': 1}},
+                                        save_outputs=False, return_history=True)
+        self.assertFalse(args.output_dir.exists())
+        self.assertEqual(set(scores['split']), {'val'})
+        self.assertEqual(curves[['log', 'iteration']].values.tolist(),
+                         [['A', 1], ['A', 2], ['B', 1], ['B', 2]])
+        self.assertTrue(np.isfinite(curves['validation_rmse']).all())
+
     def test_sample_std_and_duplicate_seed_rejection(self):
         row = {"model": "saits", "label": "SAITS", "split": "val", "scenario": "Single",
                "level": "overall", "group": "all", "units": "normalized", "count": 4}
@@ -203,6 +236,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(summary["rmse_std"], np.sqrt(2.))
         with self.assertRaisesRegex(ValueError, "Duplicate seed"):
             summarize([rows[0], rows[0]])
+
+    def test_comparison_mape_averages_logs_before_seeds(self):
+        base = dict(model='saits', label='SAITS', split='test', scenario='Single')
+        rows = []
+        for seed, offset in [(129, 0.), (219, 3.), (912, 6.)]:
+            rows.append(dict(base, seed=seed, level='overall', group='all',
+                             units='normalized', count=10, rmse=1.))
+            for log, mape in [('GR', 1.), ('RHOB', 2.), ('DTC', 3.), ('NPHI', 1000.)]:
+                rows.append(dict(base, seed=seed, level='log', group=log,
+                                 units='original', mape=mape + offset))
+        row = summarize_test_models(rows, [dict(model='saits', parameters=32)]).iloc[0]
+        self.assertEqual(row['mape_mean'], 5.)
+        self.assertEqual(row['mape_std'], 3.)
+        self.assertEqual(row['n_seeds'], 3)
 
     def test_failed_scoring_preserves_checkpoint_and_status(self):
         args = argparse.Namespace(models=("locf",), seeds=(129, 219),

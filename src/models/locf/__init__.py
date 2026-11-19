@@ -1,5 +1,5 @@
 """Training-free last-observation baseline."""
 
-from .model import LOCF, _LOCFBackend
+from .model import LOCF
 
 __all__ = ["LOCF"]
